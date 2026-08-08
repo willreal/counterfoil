@@ -235,7 +235,58 @@ struct ContentView: View {
             detailPane
         }
         .navigationSplitViewStyle(.balanced)
-        .toolbar(.hidden, for: .windowToolbar)
+        .toolbar {
+            ToolbarItemGroup(placement: .automatic) {
+                Button {
+                    guard let session = selectedMeeting else { return }
+                    copyTranscript(session: session)
+                } label: {
+                    toolbarButtonLabel("Copy Transcript", systemImage: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .labelStyle(.titleAndIcon)
+                .disabled(selectedMeeting == nil || selectedMeeting?.hasTranscript != true)
+                .help("Copy Transcript")
+
+                Button {
+                    guard let session = selectedMeeting else { return }
+                    revealInFinder(session: session)
+                } label: {
+                    toolbarButtonLabel("Reveal in Finder", systemImage: "folder")
+                }
+                .buttonStyle(.borderless)
+                .labelStyle(.titleAndIcon)
+                .disabled(selectedMeeting == nil)
+                .help("Reveal in Finder")
+
+                Menu {
+                    Button {
+                        guard let session = selectedMeeting else { return }
+                        sessionToDelete = session
+                        showingDeleteAudioConfirm = true
+                    } label: {
+                        Label("Delete Audio", systemImage: "trash")
+                    }
+                    Button(role: .destructive) {
+                        guard let session = selectedMeeting else { return }
+                        sessionToDelete = session
+                        showingDeleteEverythingConfirm = true
+                    } label: {
+                        Label("Delete Everything", systemImage: "trash.fill")
+                    }
+                } label: {
+                    toolbarDeleteLabel
+                }
+                .menuStyle(.borderlessButton)
+                .labelStyle(.titleAndIcon)
+                .disabled(selectedMeeting == nil)
+                .help("Delete")
+            }
+
+            ToolbarItem(placement: .primaryAction) {
+                toolbarSearch
+            }
+        }
         .tint(counterfoilRed)
         .sheet(isPresented: $capture.showTitlePrompt) {
             titleSheet
@@ -356,7 +407,7 @@ struct ContentView: View {
             }
         }
         .padding(.horizontal, 9)
-        .frame(width: 215, height: 28)
+        .frame(width: 170, height: 28)
         // Single-layer field: plain fill + one stroke. No nested material
         // capsule (the toolbar glass strip is the outer surface already).
         .background(Color(nsColor: .textBackgroundColor).opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
@@ -653,94 +704,22 @@ struct ContentView: View {
     }
 
     private var detailPane: some View {
-        VStack(spacing: 0) {
-            // Single top bar — the native toolbar is hidden (it collapsed
-            // labeled buttons into icon-only squares AND doubled the bar
-            // height). This bar IS the toolbar: liquid glass, full-width.
-            HStack(spacing: 8) {
-                Button {
-                    NSApp.sendAction(#selector(NSSplitViewController.toggleSidebar(_:)), to: nil, from: nil)
-                } label: {
-                    Image(systemName: "sidebar.left")
-                        .font(.system(size: 13, weight: .medium))
-                        .frame(width: 28, height: 28)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-                .help("Toggle Sidebar")
-
-                Text("Counterfoil")
-                    .font(.system(.headline, design: .rounded).weight(.semibold))
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                Button {
-                    guard let session = selectedMeeting else { return }
-                    copyTranscript(session: session)
-                } label: {
-                    toolbarButtonLabel("Copy Transcript", systemImage: "doc.on.doc")
-                }
-                .buttonStyle(.borderless)
-                .disabled(selectedMeeting == nil || selectedMeeting?.hasTranscript != true)
-                .help("Copy Transcript")
-
-                Button {
-                    guard let session = selectedMeeting else { return }
-                    revealInFinder(session: session)
-                } label: {
-                    toolbarButtonLabel("Reveal in Finder", systemImage: "folder")
-                }
-                .buttonStyle(.borderless)
-                .disabled(selectedMeeting == nil)
-                .help("Reveal in Finder")
-
-                Menu {
-                    Button {
-                        guard let session = selectedMeeting else { return }
-                        sessionToDelete = session
-                        showingDeleteAudioConfirm = true
-                    } label: {
-                        Label("Delete Audio", systemImage: "trash")
-                    }
-                    Button(role: .destructive) {
-                        guard let session = selectedMeeting else { return }
-                        sessionToDelete = session
-                        showingDeleteEverythingConfirm = true
-                    } label: {
-                        Label("Delete Everything", systemImage: "trash.fill")
-                    }
-                } label: {
-                    toolbarDeleteLabel
-                }
-                .menuStyle(.borderlessButton)
-                .disabled(selectedMeeting == nil)
-                .help("Delete")
-
-                toolbarSearch
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 52)
-            .background(.ultraThinMaterial)
-            .overlay(alignment: .bottom) { Divider() }
-
-            Group {
-                if let id = store.selectedSession,
-                   let session = store.sessions.first(where: { $0.id == id }) {
-                    transcriptView(session: session)
-                } else if store.sessions.isEmpty {
-                    EmptyMeetingState()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    VStack(spacing: 9) {
-                        Image(systemName: "text.alignleft")
-                            .font(.system(size: 28))
-                            .foregroundStyle(.tertiary)
-                        Text("Select a meeting")
-                            .foregroundStyle(.secondary)
-                    }
+        Group {
+            if let id = store.selectedSession,
+               let session = store.sessions.first(where: { $0.id == id }) {
+                transcriptView(session: session)
+            } else if store.sessions.isEmpty {
+                EmptyMeetingState()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                VStack(spacing: 9) {
+                    Image(systemName: "text.alignleft")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.tertiary)
+                    Text("Select a meeting")
+                        .foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }

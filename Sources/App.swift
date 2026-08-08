@@ -16,7 +16,7 @@ struct CounterfoilApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(store: store, capture: capture)
-                .frame(minWidth: 820, minHeight: 520)
+                .frame(minWidth: 980, minHeight: 520)
                 .task {
                     await store.loadSessions()
                 }
