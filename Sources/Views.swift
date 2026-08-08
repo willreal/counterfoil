@@ -235,6 +235,7 @@ struct ContentView: View {
             detailPane
         }
         .navigationSplitViewStyle(.balanced)
+        .toolbar(.hidden, for: .windowToolbar)
         .tint(counterfoilRed)
         .sheet(isPresented: $capture.showTitlePrompt) {
             titleSheet
@@ -351,7 +352,7 @@ struct ContentView: View {
                         .font(.system(size: 12))
                         .foregroundStyle(.tertiary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
             }
         }
         .padding(.horizontal, 9)
@@ -417,7 +418,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, minHeight: 36)
                     .contentShape(Capsule())   // hit area = whole pill
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             // Solid red primary action (user: "make the record button solid red")
             .foregroundStyle(.white)
             .frame(maxWidth: .infinity)
@@ -653,10 +654,21 @@ struct ContentView: View {
 
     private var detailPane: some View {
         VStack(spacing: 0) {
-            // Custom top bar — NOT the native toolbar, which collapses
-            // labeled buttons into icon-only squares (user: "liquid glass
-            // buttons are containers for old styling buttons").
+            // Single top bar — the native toolbar is hidden (it collapsed
+            // labeled buttons into icon-only squares AND doubled the bar
+            // height). This bar IS the toolbar: liquid glass, full-width.
             HStack(spacing: 8) {
+                Button {
+                    NSApp.sendAction(#selector(NSSplitViewController.toggleSidebar(_:)), to: nil, from: nil)
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .help("Toggle Sidebar")
+
                 Text("Counterfoil")
                     .font(.system(.headline, design: .rounded).weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -669,7 +681,7 @@ struct ContentView: View {
                 } label: {
                     toolbarButtonLabel("Copy Transcript", systemImage: "doc.on.doc")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .disabled(selectedMeeting == nil || selectedMeeting?.hasTranscript != true)
                 .help("Copy Transcript")
 
@@ -679,7 +691,7 @@ struct ContentView: View {
                 } label: {
                     toolbarButtonLabel("Reveal in Finder", systemImage: "folder")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .disabled(selectedMeeting == nil)
                 .help("Reveal in Finder")
 
@@ -707,10 +719,10 @@ struct ContentView: View {
 
                 toolbarSearch
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 12)
             .frame(height: 52)
-
-            Divider()
+            .background(.ultraThinMaterial)
+            .overlay(alignment: .bottom) { Divider() }
 
             Group {
                 if let id = store.selectedSession,
@@ -802,7 +814,7 @@ struct ContentView: View {
                     .background(Color.primary.opacity(0.9), in: Circle())
                     .foregroundStyle(Color(nsColor: .windowBackgroundColor))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .help(player.isPlaying ? "Pause" : "Play")
 
             Text(formatDuration(player.currentTime))
@@ -911,7 +923,7 @@ struct ContentView: View {
             } label: {
                 speakerLine(line, activeLineID: activeLineID)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .disabled(!player.hasAudio || line.timestamp == nil)
             .id(line.id)
         }
@@ -1355,7 +1367,7 @@ struct FlagRail: View {
                                 .foregroundStyle(counterfoilRed)
                                 .frame(width: 18, height: 18)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.borderless)
                         .position(x: geometry.size.width / 2, y: max(10, min(max(10, geometry.size.height - 10), geometry.size.height * CGFloat(time / max(totalTime, 1)))))
                         .help("Jump to \(formatTimestamp(time))")
                     }
@@ -1466,7 +1478,7 @@ struct RecordingPanelView: View {
                     .font(.system(size: 17, weight: .bold))
                     .frame(maxWidth: .infinity, minHeight: 50)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .foregroundStyle(.white)
             .background(counterfoilRed, in: RoundedRectangle(cornerRadius: 14))
             .shadow(color: counterfoilRed.opacity(0.32), radius: 10, y: 4)
@@ -1497,7 +1509,7 @@ struct RecordingPanelView: View {
                                 .font(.system(size: 11, weight: .bold))
                                 .frame(width: 32, height: 32)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.borderless)
                     .foregroundStyle(.white.opacity(0.9))
                     .contentShape(Rectangle())
                 }
@@ -1520,7 +1532,7 @@ struct RecordingPanelView: View {
                     .frame(maxWidth: 232, minHeight: 32)
                     .contentShape(Rectangle())   // hit area = whole title row
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .help("Edit meeting title")
             }
         }
@@ -1575,7 +1587,7 @@ struct RecordingPanelView: View {
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .contentShape(Rectangle())   // hit area = full cell, not just the glyph
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.borderless)
         .foregroundStyle(tint)
         .frame(maxWidth: .infinity, minHeight: 44)
         .help(help)
@@ -1597,7 +1609,7 @@ struct RecordingPanelView: View {
                         .frame(width: 32, height: 32)
                         .contentShape(Rectangle())   // hit area = whole 32pt cell
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .foregroundStyle(.white.opacity(0.75))
                 .help("Close notes")
             }
@@ -1636,7 +1648,7 @@ struct RecordingPanelView: View {
                     .frame(maxWidth: .infinity, minHeight: 36)
                     .contentShape(RoundedRectangle(cornerRadius: 9))   // hit area = whole button
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .foregroundStyle(.white)
             .background(counterfoilRed, in: RoundedRectangle(cornerRadius: 9))
             .disabled(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -1760,7 +1772,7 @@ struct SettingsView: View {
                                 .padding(.horizontal, 18)
                         }
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                     .contentShape(Rectangle())
                     .help(section.rawValue)
                 }
@@ -2325,7 +2337,7 @@ struct VocabSettingsView: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 28, height: 32)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .contentShape(Rectangle())
         }
     }
@@ -2388,7 +2400,7 @@ struct OnboardingView: View {
                     .font(.system(.headline, design: .rounded).weight(.semibold))
                 Spacer()
                 Button("Skip") { skip() }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.borderless)
                     .foregroundStyle(.secondary)
                     .frame(minWidth: 52, minHeight: 32)
                     .contentShape(Rectangle())
