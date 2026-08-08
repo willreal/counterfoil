@@ -47,7 +47,10 @@ class TranscriptStore: ObservableObject {
                 } else if name.hasSuffix(".mic.m4a") && !name.hasPrefix("meeting_") {
                     stems.insert(String(name.dropLast(8)))
                 } else if name.hasSuffix(".m4a") && !name.hasPrefix("meeting_") && !name.hasSuffix(".mic.m4a") {
-                    stems.insert(String(name.dropLast(4)))
+                    let n = name.dropLast(4)
+                    if !n.contains(".mic") {
+                        stems.insert(String(name.dropLast(4)))
+                    }
                 } else if name.hasSuffix(".md") && !name.hasPrefix("meeting_") {
                     stems.insert(String(name.dropLast(3)))
                 }
@@ -138,11 +141,14 @@ class TranscriptStore: ObservableObject {
     }
 
     func addSession(stem: String, title: String, dayDir: URL?, startTime: Date,
-                    systemText: String, micText: String, hasMicFile: Bool, duration: TimeInterval) {
+                    systemText: String, micText: String, hasMicFile: Bool, duration: TimeInterval,
+                    flaggedOffsets: [TimeInterval] = [], notes: [(TimeInterval, String)] = [],
+                    totalPausedDuration: TimeInterval = 0) {
         guard let dir = dayDir else { return }
 
         let interleaved = interleaveTranscript(
-            systemText: systemText, micText: micText, startTime: startTime, duration: duration)
+            systemText: systemText, micText: micText, startTime: startTime, duration: duration,
+            flaggedOffsets: flaggedOffsets, notes: notes)
 
         let sysLineCount = systemText.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count
         let micLineCount = micText.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count
@@ -282,11 +288,14 @@ class TranscriptStore: ObservableObject {
     }
 
     private func interleaveTranscript(systemText: String, micText: String,
-                                       startTime: Date, duration: TimeInterval) -> String {
+                                       startTime: Date, duration: TimeInterval,
+                                       flaggedOffsets: [TimeInterval] = [],
+                                       notes: [(TimeInterval, String)] = []) -> String {
         struct Line: Comparable {
             let time: TimeInterval
             let speaker: String
             let text: String
+            let isAnnotation: Bool
             static func < (lhs: Line, rhs: Line) -> Bool { lhs.time < rhs.time }
         }
 
@@ -301,15 +310,24 @@ class TranscriptStore: ObservableObject {
                     let secs = (Int(parts[0]) ?? 0) * 3600 + (Int(parts[1]) ?? 0) * 60 + (Int(parts[2]) ?? 0)
                     let elapsed = TimeInterval(secs)
                     let text = (line as NSString).substring(with: m.range(at: 2))
-                    lines.append(Line(time: elapsed, speaker: speaker, text: text))
+                    lines.append(Line(time: elapsed, speaker: speaker, text: text, isAnnotation: false))
                 } else if !line.trimmingCharacters(in: .whitespaces).isEmpty {
-                    lines.append(Line(time: duration / 2, speaker: speaker, text: line))
+                    lines.append(Line(time: duration / 2, speaker: speaker, text: line, isAnnotation: false))
                 }
             }
         }
 
         parse(systemText, speaker: "Them", baseTime: startTime)
         parse(micText, speaker: "You", baseTime: startTime)
+
+        for offset in flaggedOffsets {
+            lines.append(Line(time: offset, speaker: "", text: "[FLAG]", isAnnotation: true))
+        }
+
+        for (offset, noteText) in notes {
+            lines.append(Line(time: offset, speaker: "", text: "NOTE: \(noteText)", isAnnotation: true))
+        }
+
         lines.sort()
 
         if lines.isEmpty {
@@ -322,6 +340,9 @@ class TranscriptStore: ObservableObject {
             let m = (secs % 3600) / 60
             let s = secs % 60
             let ts = String(format: "%02d:%02d:%02d", h, m, s)
+            if line.isAnnotation {
+                return "**[\(ts)] \(line.text)**"
+            }
             return "**[\(ts)] \(line.speaker):** \(line.text)"
         }.joined(separator: "\n")
     }

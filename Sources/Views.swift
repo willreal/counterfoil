@@ -1,13 +1,101 @@
 import SwiftUI
 import AppKit
+import AVFoundation
+
+class TranscriptPlayer: ObservableObject {
+    @Published var isPlaying = false
+    @Published var currentTime: TimeInterval = 0
+    @Published var rate: Float = 1.0
+    @Published var hasAudio = false
+    @Published var activeOffset: TimeInterval?
+
+    private var player: AVPlayer?
+    private var timeObserver: Any?
+
+    func load(url: URL) {
+        stop()
+        let p = AVPlayer(url: url)
+        p.rate = rate
+        player = p
+        hasAudio = true
+
+        let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
+        timeObserver = p.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            self?.currentTime = CMTimeGetSeconds(time)
+        }
+    }
+
+    func play(from time: TimeInterval) {
+        guard let p = player else { return }
+        let cm = CMTime(seconds: time, preferredTimescale: 600)
+        p.seek(to: cm, toleranceBefore: .zero, toleranceAfter: .zero)
+        p.rate = rate
+        isPlaying = true
+        activeOffset = time
+    }
+
+    func pause() {
+        player?.pause()
+        isPlaying = false
+    }
+
+    func resume() {
+        player?.rate = rate
+        isPlaying = true
+    }
+
+    func toggle() {
+        isPlaying ? pause() : resume()
+    }
+
+    func setRate(_ r: Float) {
+        rate = r
+        if isPlaying {
+            player?.rate = r
+        }
+    }
+
+    func stop() {
+        player?.pause()
+        player = nil
+        if let obs = timeObserver {
+            player?.removeTimeObserver(obs)
+            timeObserver = nil
+        }
+        isPlaying = false
+        hasAudio = false
+        currentTime = 0
+        activeOffset = nil
+    }
+
+    deinit {
+        if let obs = timeObserver {
+            player?.removeTimeObserver(obs)
+        }
+    }
+}
+
+struct TranscriptLineItem: Identifiable {
+    let id = UUID()
+    let text: String
+    let timestamp: TimeInterval?
+    let raw: String
+    let isHeader: Bool
+    let isMeta: Bool
+    let isEmpty: Bool
+}
 
 struct ContentView: View {
     @ObservedObject var store: TranscriptStore
     @ObservedObject var capture: CaptureManager
+    @StateObject private var player = TranscriptPlayer()
     @State private var showingDeleteAudioConfirm = false
     @State private var showingDeleteEverythingConfirm = false
     @State private var sessionToDelete: Session?
     @State private var titleText = ""
+    @State private var noteText = ""
+    @State private var showNotePopover = false
+    @State private var playStatusTime: String = ""
 
     var body: some View {
         NavigationSplitView {
@@ -23,14 +111,70 @@ struct ContentView: View {
 
                 if capture.isRecording {
                     HStack(spacing: 6) {
+                        if CaptureManager.hasMic {
+                            micMeter
+                                .frame(width: 24, height: 14)
+                        }
+
                         Circle()
                             .fill(.red)
                             .frame(width: 8, height: 8)
+
                         Text(formatDuration(capture.recordingDuration))
                             .font(.system(.body, design: .monospaced))
-                            .foregroundColor(.red)
+                            .foregroundColor(capture.isPaused ? .yellow : .red)
                     }
                     .padding(.horizontal, 8)
+
+                    if !capture.isPaused {
+                        Button {
+                            capture.flagCurrentMoment()
+                        } label: {
+                            Image(systemName: "flag.fill")
+                        }
+                        .help("Flag moment (⌥⌘F)")
+
+                        Button {
+                            noteText = ""
+                            showNotePopover = true
+                        } label: {
+                            Image(systemName: "note.text.badge.plus")
+                        }
+                        .help("Add note")
+                        .popover(isPresented: $showNotePopover, arrowEdge: .bottom) {
+                            VStack(spacing: 8) {
+                                Text("Add note at current time")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                TextField("Note", text: $noteText)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 220)
+                                    .onSubmit {
+                                        commitNote()
+                                    }
+                                HStack {
+                                    Spacer()
+                                    Button("Cancel") { showNotePopover = false }
+                                    Button("Add") { commitNote() }
+                                        .keyboardShortcut(.return, modifiers: [])
+                                        .disabled(noteText.trimmingCharacters(in: .whitespaces).isEmpty)
+                                }
+                            }
+                            .padding(12)
+                        }
+                    }
+
+                    Button {
+                        if capture.isPaused {
+                            capture.resumeCapture()
+                        } else {
+                            capture.pauseCapture()
+                        }
+                    } label: {
+                        Image(systemName: capture.isPaused ? "play.fill" : "pause.fill")
+                    }
+                    .foregroundColor(.yellow)
+                    .help(capture.isPaused ? "Resume recording (⌘P)" : "Pause recording (⌘P)")
                 }
 
                 if !CaptureManager.hasMic {
@@ -61,6 +205,27 @@ struct ContentView: View {
         }
         .sheet(isPresented: $capture.showTitlePrompt) {
             titleSheet
+        }
+    }
+
+    func commitNote() {
+        let t = noteText.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return }
+        capture.addNote(t)
+        showNotePopover = false
+    }
+
+    var micMeter: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.secondary.opacity(0.2))
+                    .frame(height: 4)
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.green)
+                    .frame(width: max(2, geo.size.width * capture.micLevel), height: 4)
+                    .animation(.easeOut(duration: 0.1), value: capture.micLevel)
+            }
         }
     }
 
@@ -106,8 +271,10 @@ struct ContentView: View {
             get: { store.selectedSession },
             set: { id in
                 store.selectedSession = id
+                player.stop()
                 if let id, let s = store.sessions.first(where: { $0.id == id }) {
                     store.loadTranscript(for: s)
+                    loadPlayer(for: s)
                 }
             }
         )) {
@@ -125,6 +292,13 @@ struct ContentView: View {
         }
         .listStyle(.sidebar)
         .background(coralBackground)
+    }
+
+    func loadPlayer(for session: Session) {
+        let sysM4a = (session.dayDir as NSString).appendingPathComponent("\(session.stem).m4a")
+        if FileManager.default.fileExists(atPath: sysM4a) {
+            player.load(url: URL(fileURLWithPath: sysM4a))
+        }
     }
 
     var coralBackground: some View {
@@ -265,6 +439,38 @@ struct ContentView: View {
                 }
                 Spacer()
 
+                if session.hasTranscript, player.hasAudio {
+                    HStack(spacing: 4) {
+                        Button {
+                            player.toggle()
+                        } label: {
+                            Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                        }
+                        .help(player.isPlaying ? "Pause" : "Play")
+
+                        if player.isPlaying || player.currentTime > 0 {
+                            Text(formatDuration(player.currentTime))
+                                .font(.caption.monospaced())
+                                .foregroundColor(.secondary)
+                                .frame(width: 48, alignment: .leading)
+                        }
+
+                        Picker("Speed", selection: Binding(get: {
+                            Double(player.rate)
+                        }, set: { r in
+                            player.setRate(Float(r))
+                        })) {
+                            Text("0.5×").tag(0.5)
+                            Text("1×").tag(1.0)
+                            Text("1.5×").tag(1.5)
+                            Text("2×").tag(2.0)
+                        }
+                        .pickerStyle(.menu)
+                        .frame(width: 64)
+                        .help("Playback speed")
+                    }
+                }
+
                 if session.hasTranscript {
                     Button {
                         copyTranscript(session: session)
@@ -310,14 +516,7 @@ struct ContentView: View {
                     emptyTranscribing
                 }
             } else {
-                ScrollView {
-                    Text(parseMarkdown(store.transcriptContent[session.id] ?? ""))
-                        .textSelection(.enabled)
-                        .font(.system(.body))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(16)
-                }
-                .background(Color(nsColor: .textBackgroundColor))
+                transcriptBody(session: session)
             }
 
             if capture.status.contains("Transcribing") {
@@ -331,6 +530,114 @@ struct ContentView: View {
                 .padding(8)
             }
         }
+    }
+
+    func transcriptBody(session: Session) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    let lines = parseTranscriptLines(store.transcriptContent[session.id] ?? "")
+                    ForEach(lines) { line in
+                        if line.isHeader || line.isMeta || line.isEmpty {
+                            Text(parseMarkdown(line.raw))
+                                .textSelection(.enabled)
+                                .font(.system(.body))
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, line.isEmpty ? 0 : 4)
+                        } else {
+                            Button {
+                                if player.hasAudio, let ts = line.timestamp {
+                                    player.play(from: ts)
+                                }
+                            } label: {
+                                Text(parseMarkdown(line.raw))
+                                    .font(.system(.body))
+                                    .multilineTextAlignment(.leading)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 3)
+                            .contentShape(Rectangle())
+                            .background(
+                                player.hasAudio && player.activeOffset == line.timestamp && player.isPlaying
+                                    ? Color.accentColor.opacity(0.12)
+                                    : Color.clear
+                            )
+                            .id(line.id)
+                            .onHover { hovering in
+                                if hovering && player.hasAudio && line.timestamp != nil {
+                                    NSCursor.pointingHand.push()
+                                } else {
+                                    NSCursor.pop()
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+            .onChange(of: player.currentTime) { _, newTime in
+                if player.isPlaying {
+                    if let activeLine = findActiveLine(
+                        store.transcriptContent[session.id] ?? "",
+                        time: newTime
+                    ) {
+                        proxy.scrollTo(activeLine.id, anchor: .center)
+                    }
+                }
+            }
+        }
+    }
+
+    func parseTranscriptLines(_ md: String) -> [TranscriptLineItem] {
+        let rawLines = md.components(separatedBy: "\n")
+        var items: [TranscriptLineItem] = []
+        let tsPattern = try! NSRegularExpression(pattern: #"^\*\*\[(\d{2}:\d{2}:\d{2})\]"#, options: [])
+
+        for raw in rawLines {
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty {
+                items.append(TranscriptLineItem(text: "", timestamp: nil, raw: raw, isHeader: false, isMeta: false, isEmpty: true))
+                continue
+            }
+            if trimmed.hasPrefix("# ") {
+                items.append(TranscriptLineItem(text: trimmed, timestamp: nil, raw: raw, isHeader: true, isMeta: false, isEmpty: false))
+                continue
+            }
+            if trimmed.hasPrefix("*") && trimmed.hasSuffix("*") {
+                items.append(TranscriptLineItem(text: trimmed, timestamp: nil, raw: raw, isHeader: false, isMeta: true, isEmpty: false))
+                continue
+            }
+
+            if let m = tsPattern.firstMatch(in: trimmed, options: [], range: NSRange(location: 0, length: trimmed.utf16.count)) {
+                let tsStr = (trimmed as NSString).substring(with: m.range(at: 1))
+                let parts = tsStr.components(separatedBy: ":")
+                let secs = (Int(parts[0]) ?? 0) * 3600 + (Int(parts[1]) ?? 0) * 60 + (Int(parts[2]) ?? 0)
+                items.append(TranscriptLineItem(
+                    text: trimmed,
+                    timestamp: TimeInterval(secs),
+                    raw: raw,
+                    isHeader: false, isMeta: false, isEmpty: false
+                ))
+            } else {
+                items.append(TranscriptLineItem(text: trimmed, timestamp: nil, raw: raw, isHeader: false, isMeta: false, isEmpty: false))
+            }
+        }
+        return items
+    }
+
+    func findActiveLine(_ md: String, time: TimeInterval) -> TranscriptLineItem? {
+        let lines = parseTranscriptLines(md)
+        var best: TranscriptLineItem?
+        for line in lines {
+            guard let ts = line.timestamp else { continue }
+            if ts <= time + 0.25 {
+                best = line
+            }
+        }
+        return best
     }
 
     var emptyDetail: some View {

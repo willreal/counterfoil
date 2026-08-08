@@ -29,6 +29,26 @@ struct CounterfoilApp: App {
                     }
                 }
                 .keyboardShortcut("r", modifiers: [.command])
+
+                Divider()
+
+                Button(capture.isPaused ? "Resume Recording" : "Pause Recording") {
+                    if capture.isPaused {
+                        capture.resumeCapture()
+                    } else {
+                        capture.pauseCapture()
+                    }
+                }
+                .keyboardShortcut("p", modifiers: [.command])
+                .disabled(!capture.isRecording)
+
+                Divider()
+
+                Button("Flag Moment") {
+                    capture.flagCurrentMoment()
+                }
+                .keyboardShortcut("f", modifiers: [.option, .command])
+                .disabled(!capture.isRecording || capture.isPaused)
             }
         }
     }

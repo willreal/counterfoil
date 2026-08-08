@@ -6,10 +6,12 @@ import Combine
 
 class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
     @Published var isRecording = false
+    @Published var isPaused = false
     @Published var status = "Ready"
     @Published var recordingDuration: TimeInterval = 0
     @Published var recordingStartTime: Date?
     @Published var showTitlePrompt = false
+    @Published var micLevel: CGFloat = 0
 
     private var stream: SCStream?
     private var assetWriter: AVAssetWriter?
@@ -26,6 +28,17 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
     private var audioEngine: AVAudioEngine?
     private var micFile: AVAudioFile?
     private var durationTimer: AnyCancellable?
+
+    private var activityToken: NSObjectProtocol?
+    var totalPausedDuration: TimeInterval = 0
+    private var pauseStartTime: Date?
+
+    var flaggedOffsets: [TimeInterval] = []
+    var notes: [(TimeInterval, String)] = []
+
+    private var segmentSystemURLs: [URL] = []
+    private var segmentMicURLs: [URL] = []
+    private var segmentStartDates: [Date] = []
 
     static let hasMic: Bool = {
         AVCaptureDevice.default(for: .audio) != nil
@@ -61,6 +74,26 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
         return df.string(from: date)
     }
 
+    func currentElapsedTime() -> TimeInterval {
+        guard let start = recordingStartTime else { return 0 }
+        var elapsed = Date().timeIntervalSince(start) - totalPausedDuration
+        if isPaused, let pauseStart = pauseStartTime {
+            elapsed -= Date().timeIntervalSince(pauseStart)
+        }
+        return max(0, elapsed)
+    }
+
+    func flagCurrentMoment() {
+        guard isRecording, !isPaused else { return }
+        flaggedOffsets.append(currentElapsedTime())
+    }
+
+    func addNote(_ text: String) {
+        guard isRecording else { return }
+        let t = currentElapsedTime()
+        notes.append((t, text))
+    }
+
     func start(title: String) {
         let now = Date()
         recordingStartTime = now
@@ -72,6 +105,19 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
         sessionDir = Self.dayDir(date: now)
         systemFileURL = sessionDir!.appendingPathComponent("\(stem).m4a")
         micFileURL = sessionDir!.appendingPathComponent("\(stem).mic.m4a")
+
+        totalPausedDuration = 0
+        pauseStartTime = nil
+        flaggedOffsets = []
+        notes = []
+        segmentSystemURLs = [systemFileURL!]
+        segmentMicURLs = []
+        if Self.hasMic { segmentMicURLs.append(micFileURL!) }
+        segmentStartDates = [now]
+
+        activityToken = ProcessInfo.processInfo.beginActivity(
+            options: [.idleDisplaySleepDisabled, .idleSystemSleepDisabled],
+            reason: "Recording meeting")
 
         Task {
             do {
@@ -85,7 +131,74 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
                     self.startDurationTimer()
                 }
             } catch {
+                endActivityToken()
                 await MainActor.run {
+                    self.status = "Error: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func pauseCapture() {
+        guard isRecording, !isPaused else { return }
+        isPaused = true
+        pauseStartTime = Date()
+        status = "Paused"
+
+        stream?.stopCapture()
+        stream = nil
+        assetWriterInput?.markAsFinished()
+        if let writer = assetWriter {
+            Task {
+                await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                    writer.finishWriting { c.resume() }
+                }
+            }
+        }
+        assetWriter = nil
+        assetWriterInput = nil
+        started = false
+        finished = false
+        failure = nil
+
+        micFile = nil
+        audioEngine?.stop()
+        audioEngine = nil
+    }
+
+    func resumeCapture() {
+        guard isRecording, isPaused else { return }
+        if let pauseStart = pauseStartTime {
+            totalPausedDuration += Date().timeIntervalSince(pauseStart)
+        }
+        pauseStartTime = nil
+
+        guard let dir = sessionDir else { return }
+        let segIndex = segmentSystemURLs.count
+        let segSysURL = dir.appendingPathComponent("\(sessionStem).\(segIndex + 1).m4a")
+        systemFileURL = segSysURL
+        segmentSystemURLs.append(segSysURL)
+        segmentStartDates.append(Date())
+
+        if Self.hasMic {
+            let segMicURL = dir.appendingPathComponent("\(sessionStem).mic.\(segIndex + 1).m4a")
+            micFileURL = segMicURL
+            segmentMicURLs.append(segMicURL)
+        }
+
+        Task {
+            do {
+                try await startSystemCapture(to: segSysURL)
+                if Self.hasMic, let micURL = micFileURL {
+                    try startMicCapture(to: micURL)
+                }
+                await MainActor.run {
+                    self.isPaused = false
+                    self.status = "Recording"
+                }
+            } catch {
+                await MainActor.run {
+                    self.isPaused = false
                     self.status = "Error: \(error.localizedDescription)"
                 }
             }
@@ -96,107 +209,138 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
         guard isRecording else { return }
         let stem = sessionStem
         let dir = sessionDir
-        let sysURL = systemFileURL
-        let micURL = micFileURL
         let startTime = recordingStartTime ?? Date()
-        let isMicPresent = micURL != nil && Self.hasMic
+        let isMicPresent = Self.hasMic && !segmentMicURLs.isEmpty
         let recDuration = recordingDuration
         let title = sessionTitle
+        let flags = flaggedOffsets
+        let notesList = notes
+        let pausedDuration = totalPausedDuration
+        let sysURLs = segmentSystemURLs
+        let micURLs = segmentMicURLs
+        let segStartDates = segmentStartDates
 
         durationTimer?.cancel()
         durationTimer = nil
 
-        Task {
-            do {
-                try await stream?.stopCapture()
-            } catch {
-                print("stop capture error: \(error)")
+        if isPaused {
+            if let pauseStart = pauseStartTime {
+                totalPausedDuration += Date().timeIntervalSince(pauseStart)
             }
+            isPaused = false
+        }
 
-            await finishWriter()
+        endActivityToken()
 
+        if stream != nil {
+            Task {
+                do {
+                    try await stream?.stopCapture()
+                } catch {
+                    print("stop capture error: \(error)")
+                }
+                await finishWriter()
+                proceedWithStop()
+            }
+        } else {
+            Task { proceedWithStop() }
+        }
+
+        func proceedWithStop() {
             micFile = nil
             audioEngine?.stop()
             audioEngine = nil
 
-            await MainActor.run {
-                self.isRecording = false
-                self.status = "Saving..."
-            }
+            Task {
+                await MainActor.run {
+                    self.isRecording = false
+                    self.status = "Saving..."
+                }
 
-            let waitDeadline = Date().addingTimeInterval(15)
-            while !finished && Date() < waitDeadline {
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
+                let waitDeadline = Date().addingTimeInterval(15)
+                while !finished && Date() < waitDeadline {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
 
-            if let f = failure {
-                await MainActor.run { self.status = "Recording failed: \(f)" }
-                return
-            }
+                await MainActor.run {
+                    self.status = "Transcribing..."
+                }
 
-            await MainActor.run {
-                self.status = "Transcribing..."
-            }
+                var allSysLines: [String] = []
+                var allMicLines: [String] = []
 
-            var sysText = ""
-            var micText = ""
-
-            await withTaskGroup(of: (String, String).self) { group in
-                group.addTask {
-                    if let url = sysURL {
+                for i in 0..<sysURLs.count {
+                    let segStart = segStartDates[i]
+                    if let url = sysURLs[safe: i] {
                         do {
                             let text = try await Transcriber.shared.transcribe(
-                                filePath: url.path, startTime: startTime)
-                            return ("system", text)
+                                filePath: url.path, startTime: segStart)
+                            allSysLines.append(text)
                         } catch {
                             print("system transcribe error: \(error)")
-                            return ("system", "[transcribe error]")
+                            allSysLines.append("[transcribe error]")
                         }
                     }
-                    return ("system", "")
-                }
-                if isMicPresent, let url = micURL {
-                    group.addTask {
+                    if isMicPresent, let url = micURLs[safe: i] {
                         do {
                             let text = try await Transcriber.shared.transcribe(
-                                filePath: url.path, startTime: startTime)
-                            return ("mic", text)
+                                filePath: url.path, startTime: segStart)
+                            allMicLines.append(text)
                         } catch {
                             print("mic transcribe error: \(error)")
-                            return ("mic", "[transcribe error]")
+                            allMicLines.append("[transcribe error]")
                         }
                     }
                 }
-                for await (source, text) in group {
-                    if source == "system" { sysText = text }
-                    if source == "mic" { micText = text }
+
+                let finalSysText = allSysLines.joined(separator: "\n")
+                let finalMicText = allMicLines.joined(separator: "\n")
+
+                await MainActor.run {
+                    store.addSession(
+                        stem: stem,
+                        title: title,
+                        dayDir: dir,
+                        startTime: startTime,
+                        systemText: finalSysText,
+                        micText: finalMicText,
+                        hasMicFile: isMicPresent,
+                        duration: recDuration,
+                        flaggedOffsets: flags,
+                        notes: notesList,
+                        totalPausedDuration: pausedDuration
+                    )
+                    self.status = "Ready"
+                    self.recordingDuration = 0
+                    self.sessionStem = ""
+                    self.sessionTitle = ""
+                    self.systemFileURL = nil
+                    self.micFileURL = nil
+                    self.finished = false
+                    self.started = false
+                    self.failure = nil
+                    self.segmentSystemURLs = []
+                    self.segmentMicURLs = []
+                    self.segmentStartDates = []
+                    self.flaggedOffsets = []
+                    self.notes = []
+                    self.totalPausedDuration = 0
+                }
+
+                for i in 1..<sysURLs.count {
+                    try? FileManager.default.removeItem(at: sysURLs[i])
+                }
+                for i in 1..<micURLs.count {
+                    try? FileManager.default.removeItem(at: micURLs[i])
                 }
             }
+        }
+    }
 
-            let finalSysText = sysText
-            let finalMicText = micText
-
-            await MainActor.run {
-                store.addSession(
-                    stem: stem,
-                    title: title,
-                    dayDir: dir,
-                    startTime: startTime,
-                    systemText: finalSysText,
-                    micText: finalMicText,
-                    hasMicFile: isMicPresent,
-                    duration: recDuration
-                )
-                self.status = "Ready"
-                self.recordingDuration = 0
-                self.sessionStem = ""
-                self.sessionTitle = ""
-                self.systemFileURL = nil
-                self.micFileURL = nil
-                self.finished = false
-                self.started = false
-                self.failure = nil
-            }
+    private func endActivityToken() {
+        if let token = activityToken {
+            ProcessInfo.processInfo.endActivity(token)
+            activityToken = nil
         }
     }
 
@@ -284,6 +428,24 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
             }
         }
 
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
+            guard let self else { return }
+            let frameLen = Int(buffer.frameLength)
+            guard frameLen > 0,
+                  let channelData = buffer.floatChannelData else { return }
+            let ptr = channelData[0]
+            var sum: Float = 0
+            for i in 0..<frameLen {
+                let s = ptr[i]
+                sum += s * s
+            }
+            let rms = sqrt(sum / Float(frameLen))
+            let level = min(rms * 4, 1.0)
+            DispatchQueue.main.async {
+                self.micLevel = CGFloat(level)
+            }
+        }
+
         engine.prepare()
         try engine.start()
         audioEngine = engine
@@ -294,7 +456,8 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self, let start = self.recordingStartTime else { return }
-                self.recordingDuration = Date().timeIntervalSince(start)
+                if self.isPaused { return }
+                self.recordingDuration = Date().timeIntervalSince(start) - self.totalPausedDuration
             }
     }
 
@@ -333,5 +496,11 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
                 finished = true
             }
         }
+    }
+}
+
+extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
