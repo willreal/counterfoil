@@ -775,6 +775,26 @@ struct ContentView: View {
                 .foregroundColor(.secondary)
             Text("Press ⌘R or click Record to start your first meeting")
                 .foregroundColor(Color(nsColor: .tertiaryLabelColor))
+            if !Transcriber.shared.modelsAvailable {
+                VStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundColor(.orange)
+                    Text("Transcription models not installed")
+                        .font(.callout)
+                    Text("Open Settings → Models to download")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Button("Open Settings") {
+                        if #available(macOS 14.0, *) {
+                            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                        } else {
+                            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+                .padding()
+            }
             if capture.status.contains("Error") {
                 Text(capture.status)
                     .foregroundColor(.red)
@@ -786,11 +806,32 @@ struct ContentView: View {
 
     var emptyTranscribing: some View {
         VStack(spacing: 16) {
-            Image(systemName: "text.badge.xmark")
-                .font(.system(size: 32))
-                .foregroundColor(.secondary)
-            Text("No transcript yet")
-                .foregroundColor(.secondary)
+            if !Transcriber.shared.modelsAvailable {
+                Image(systemName: "square.stack.3d.up.trianglebadge.exclamationmark")
+                    .font(.system(size: 32))
+                    .foregroundColor(.orange)
+                Text("Models needed for transcription")
+                    .font(.headline)
+                Text("Download models in Settings → Models to enable transcription.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(width: 260)
+                Button("Open Settings") {
+                    if #available(macOS 14.0, *) {
+                        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    } else {
+                        NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+                    }
+                }
+                .padding(.top, 4)
+            } else {
+                Image(systemName: "text.badge.xmark")
+                    .font(.system(size: 32))
+                    .foregroundColor(.secondary)
+                Text("No transcript yet")
+                    .foregroundColor(.secondary)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -872,8 +913,12 @@ struct SettingsView: View {
                 .tabItem { Label("Vocabulary", systemImage: "textformat.abc") }
             GeneralSettingsView()
                 .tabItem { Label("General", systemImage: "gearshape") }
+            ModelsSettingsView()
+                .tabItem { Label("Models", systemImage: "square.stack.3d.up") }
+            AboutSettingsView()
+                .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 480, height: 380)
+        .frame(width: 520, height: 420)
     }
 }
 
@@ -915,14 +960,304 @@ struct GeneralSettingsView: View {
                     }
                     .onChange(of: selectedModel) { _, newValue in
                         settings.selectedModel = newValue
+                        Task { await Transcriber.shared.preloadModels() }
                     }
-                    Text("The selected model is used for all future transcriptions.")
+                    Text("The selected model is used for all future transcriptions. Changes take effect at next transcription.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+struct ModelsSettingsView: View {
+    @ObservedObject var settings = SettingsStore.shared
+    @State private var v2Downloading = false
+    @State private var v3Downloading = false
+    @State private var v2Progress: Double = 0
+    @State private var v3Progress: Double = 0
+    @State private var v2Error: String?
+    @State private var v3Error: String?
+    @State private var v2Completed = false
+    @State private var v3Completed = false
+
+    var body: some View {
+        Form {
+            Section {
+                Text("Transcription models live in ~/Library/Application Support/Counterfoil/Models/")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("Installed Models") {
+                if settings.availableModels.isEmpty {
+                    Label("No models installed", systemImage: "xmark.circle")
+                        .foregroundColor(.secondary)
+                } else {
+                    ForEach(settings.availableModels, id: \.self) { model in
+                        HStack {
+                            Label(model, systemImage: "shippingbox.fill")
+                                .foregroundColor(.primary)
+                            Spacer()
+                            Text("Installed")
+                                .font(.caption)
+                                .foregroundColor(.green)
+                        }
+                    }
+                }
+            }
+
+            Section("Download Models") {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Parakeet V2")
+                                .font(.body.bold())
+                            Text("~450 MB · 1,031-token vocab · Default model")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        if v2Completed || settings.hasModel(named: "Parakeet V2") {
+                            Label("Installed", systemImage: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                        } else if v2Downloading {
+                            VStack(spacing: 2) {
+                                ProgressView(value: v2Progress, total: 1.0)
+                                    .frame(width: 80)
+                                Text("\(Int(v2Progress * 100))%")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else {
+                            Button("Download V2") {
+                                downloadV2()
+                            }
+                        }
+                    }
+
+                    if let err = v2Error {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Parakeet V3")
+                                .font(.body.bold())
+                            Text("~461 MB · 8,192-token vocab · Improved accuracy")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        if v3Completed || settings.hasModel(named: "parakeet-tdt-0.6b-v3-coreml") {
+                            Label("Installed", systemImage: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                        } else if v3Downloading {
+                            VStack(spacing: 2) {
+                                ProgressView(value: v3Progress, total: 1.0)
+                                    .frame(width: 80)
+                                Text("\(Int(v3Progress * 100))%")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        } else {
+                            Button("Download V3") {
+                                downloadV3()
+                            }
+                        }
+                    }
+
+                    if let err = v3Error {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    func downloadV2() {
+        v2Error = nil
+        v2Downloading = true
+        v2Progress = 0
+        performDownload(urlString: Transcriber.modelDownloadURLv2, label: "parakeet-v2") { progress in
+            DispatchQueue.main.async { v2Progress = progress }
+        } completion: { result in
+            DispatchQueue.main.async {
+                v2Downloading = false
+                switch result {
+                case .success:
+                    v2Completed = true
+                    v2Progress = 1.0
+                    Task { await Transcriber.shared.preloadModels() }
+                case .failure(let err):
+                    v2Error = err.localizedDescription
+                }
+            }
+        }
+    }
+
+    func downloadV3() {
+        v3Error = nil
+        v3Downloading = true
+        v3Progress = 0
+        performDownload(urlString: Transcriber.modelDownloadURLv3, label: "parakeet-v3") { progress in
+            DispatchQueue.main.async { v3Progress = progress }
+        } completion: { result in
+            DispatchQueue.main.async {
+                v3Downloading = false
+                switch result {
+                case .success:
+                    v3Completed = true
+                    v3Progress = 1.0
+                    Task { await Transcriber.shared.preloadModels() }
+                case .failure(let err):
+                    v3Error = err.localizedDescription
+                }
+            }
+        }
+    }
+
+    func performDownload(urlString: String, label: String,
+                         progress: @escaping (Double) -> Void,
+                         completion: @escaping (Result<Void, Error>) -> Void) {
+        Task {
+            do {
+                guard let url = URL(string: urlString) else {
+                    throw NSError(domain: "download", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
+                }
+
+                let tmpDir = FileManager.default.temporaryDirectory
+                let archivePath = tmpDir.appendingPathComponent("\(label)-\(UUID().uuidString).tar.gz")
+
+                let (bytes, response) = try await withProgressDownload(url: url, progress: progress)
+                try bytes.write(to: archivePath)
+
+                guard let httpResp = response as? HTTPURLResponse, (200...299).contains(httpResp.statusCode) else {
+                    throw NSError(domain: "download", code: 2,
+                                  userInfo: [NSLocalizedDescriptionKey: "Download failed with HTTP error"])
+                }
+
+                let modelsDir = Transcriber.modelsDir
+                try? FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
+
+                let extractDir = try await extractTarGz(at: archivePath, to: modelsDir)
+                try? FileManager.default.removeItem(at: archivePath)
+
+                guard let extracted = extractDir else {
+                    throw NSError(domain: "download", code: 3,
+                                  userInfo: [NSLocalizedDescriptionKey: "Failed to extract archive"])
+                }
+
+                let names = ["Preprocessor", "Encoder", "Decoder", "JointDecision"]
+                for name in names {
+                    if !FileManager.default.fileExists(atPath: extracted.appendingPathComponent("\(name).mlmodelc").path) {
+                        throw NSError(domain: "download", code: 4,
+                                      userInfo: [NSLocalizedDescriptionKey: "Archive missing \(name).mlmodelc"])
+                    }
+                }
+
+                completion(.success(()))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
+    func withProgressDownload(url: URL, progress: @escaping (Double) -> Void) async throws -> (Data, URLResponse) {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3600
+
+        let (bytes, response) = try await URLSession.shared.data(for: request)
+        progress(1.0)
+        return (bytes, response)
+    }
+
+    func extractTarGz(at archivePath: URL, to destDir: URL) async throws -> URL? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        process.arguments = ["-xzf", archivePath.path, "-C", destDir.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else { return nil }
+
+        let fm = FileManager.default
+        if let contents = try? fm.contentsOfDirectory(at: destDir, includingPropertiesForKeys: [.contentModificationDateKey]) {
+            let sorted = contents.sorted {
+                let d1 = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
+                let d2 = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
+                return d1 > d2
+            }
+            for item in sorted {
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue {
+                    if fm.fileExists(atPath: item.appendingPathComponent("Preprocessor.mlmodelc").path) {
+                        return item
+                    }
+                }
+            }
+            for item in sorted {
+                var isDir: ObjCBool = false
+                if fm.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue {
+                    return item
+                }
+            }
+        }
+        return destDir
+    }
+}
+
+struct AboutSettingsView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Spacer()
+
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 72, height: 72)
+
+            Text("Counterfoil")
+                .font(.title.bold())
+            Text("Version \(bundleVersion()) (\(bundleBuild()))")
+                .font(.body)
+                .foregroundColor(.secondary)
+
+            Divider()
+                .frame(width: 200)
+
+            Text("100% local. Audio and transcripts never leave your Mac. No accounts, no cloud, no tracking.")
+                .font(.callout)
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+                .frame(width: 280)
+                .padding(.vertical, 4)
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+
+    func bundleVersion() -> String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+    }
+
+    func bundleBuild() -> String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
     }
 }
 
