@@ -451,13 +451,15 @@ struct ContentView: View {
     }
 
     private var sidebarFooter: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Button {
                 showImportPicker = true
             } label: {
                 Label("Import", systemImage: "plus")
                     .font(.system(.callout, design: .rounded).weight(.semibold))
-                    .frame(minWidth: 92, minHeight: 36)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .frame(minWidth: 76, minHeight: 36)
                     .contentShape(Capsule())   // hit area = whole pill
             }
             .buttonStyle(.plain)
@@ -469,19 +471,20 @@ struct ContentView: View {
             .help("Import audio")
             .disabled(capture.isRecording)
 
-            Spacer()
-
             Button {
                 titleText = ""
                 capture.showTitlePrompt = true
             } label: {
                 Label("Record Meeting", systemImage: "record.circle.fill")
                     .font(.system(.callout, design: .rounded).weight(.semibold))
-                    .frame(minWidth: 151, minHeight: 36)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .frame(maxWidth: .infinity, minHeight: 36)
                     .contentShape(Capsule())   // hit area = whole pill
             }
             .buttonStyle(.plain)
             .foregroundStyle(counterfoilRed)
+            .frame(maxWidth: .infinity)
             .background {
                 Capsule()
                     .fill(.ultraThinMaterial)
