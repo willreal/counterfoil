@@ -7,9 +7,9 @@ import UniformTypeIdentifiers
 private let counterfoilRed = Color(red: 1.0, green: 0.231, blue: 0.188)
 private let counterfoilCoral = Color(red: 0.86, green: 0.43, blue: 0.37)
 private let counterfoilRecordingNoteAccent = Color.white.opacity(0.88)
-// Notes are white/light in the dark recording glass; use the adaptive label
-// equivalent in the transcript so that same neutral identity stays visible.
-private let counterfoilTranscriptNoteAccent = Color(nsColor: .secondaryLabelColor)
+// Notes carry a real accent color (not gray) so they stand out from
+// flags in the transcript: warm blue, adapted for the transcript background.
+private let counterfoilTranscriptNoteAccent = Color(red: 0.25, green: 0.55, blue: 0.92)
 
 func formatDuration(_ duration: TimeInterval) -> String {
     let totalSeconds = max(0, Int(duration))
@@ -425,6 +425,7 @@ struct ContentView: View {
             .font(.system(size: 12, weight: .medium))
             .padding(.horizontal, 8)
             .frame(height: 27)
+            .contentShape(RoundedRectangle(cornerRadius: 8))   // hit area = whole pill
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
             .overlay {
                 RoundedRectangle(cornerRadius: 8)
@@ -457,6 +458,7 @@ struct ContentView: View {
                 Label("Import", systemImage: "plus")
                     .font(.system(.callout, design: .rounded).weight(.semibold))
                     .frame(minWidth: 92, minHeight: 36)
+                    .contentShape(Capsule())   // hit area = whole pill
             }
             .buttonStyle(.plain)
             .foregroundStyle(.primary)
@@ -464,7 +466,6 @@ struct ContentView: View {
             .overlay {
                 Capsule().stroke(Color.primary.opacity(0.11), lineWidth: 1)
             }
-            .contentShape(Capsule())
             .help("Import audio")
             .disabled(capture.isRecording)
 
@@ -477,6 +478,7 @@ struct ContentView: View {
                 Label("Record Meeting", systemImage: "record.circle.fill")
                     .font(.system(.callout, design: .rounded).weight(.semibold))
                     .frame(minWidth: 151, minHeight: 36)
+                    .contentShape(Capsule())   // hit area = whole pill
             }
             .buttonStyle(.plain)
             .foregroundStyle(counterfoilRed)
@@ -488,7 +490,6 @@ struct ContentView: View {
             .overlay {
                 Capsule().stroke(counterfoilRed.opacity(0.42), lineWidth: 1)
             }
-            .contentShape(Capsule())
             .help("Start a recording")
             .disabled(capture.isRecording)
         }
@@ -735,10 +736,25 @@ struct ContentView: View {
 
     private func transcriptView(session: Session) -> some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Quiet meta line (date · duration) — the title itself lives in
+            // the sidebar; repeating it here was removed by design.
+            HStack(spacing: 9) {
+                Text(session.startTime, style: .date)
+                Text("·")
+                if session.duration > 0 {
+                    Text(formatDuration(session.duration))
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 31)
+            .padding(.top, 14)
+            .padding(.bottom, 4)
+
             if player.hasAudio {
                 transportBar(session: session)
                     .padding(.horizontal, 31)
-                    .padding(.top, 18)
+                    .padding(.top, 8)
                     .padding(.bottom, 18)
             }
 
@@ -1084,6 +1100,12 @@ struct ContentView: View {
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty {
                 items.append(TranscriptLineItem(text: "", timestamp: nil, raw: raw, speaker: nil, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: true, lineIndex: lineIndex))
+                continue
+            }
+            // Old transcripts wrote "_No transcript available_" (markdown
+            // emphasis). Normalize the line so it never renders raw underscores.
+            if trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "_")) == "No transcript available" {
+                items.append(TranscriptLineItem(text: "No transcript available", timestamp: nil, raw: "No transcript available", speaker: nil, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false, lineIndex: lineIndex))
                 continue
             }
             if trimmed.hasPrefix("# ") {
@@ -1476,9 +1498,9 @@ struct RecordingPanelView: View {
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white.opacity(0.94))
                     .frame(maxWidth: 232, minHeight: 32)
+                    .contentShape(Rectangle())   // hit area = whole title row
                 }
                 .buttonStyle(.plain)
-                .contentShape(Rectangle())
                 .help("Edit meeting title")
             }
         }
@@ -1530,13 +1552,12 @@ struct RecordingPanelView: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 15, weight: .medium))
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: 36)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())   // hit area = full cell, not just the glyph
         }
         .buttonStyle(.plain)
         .foregroundStyle(tint)
         .frame(maxWidth: .infinity, minHeight: 44)
-        .contentShape(Rectangle())
         .help(help)
     }
 
@@ -1554,10 +1575,10 @@ struct RecordingPanelView: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 11, weight: .bold))
                         .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())   // hit area = whole 32pt cell
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.white.opacity(0.75))
-                .contentShape(Rectangle())
                 .help("Close notes")
             }
 
@@ -1593,11 +1614,11 @@ struct RecordingPanelView: View {
                 Label("Save Note", systemImage: "arrow.up.circle.fill")
                     .font(.system(.callout, design: .rounded).weight(.semibold))
                     .frame(maxWidth: .infinity, minHeight: 36)
+                    .contentShape(RoundedRectangle(cornerRadius: 9))   // hit area = whole button
             }
             .buttonStyle(.plain)
             .foregroundStyle(.white)
             .background(counterfoilRed, in: RoundedRectangle(cornerRadius: 9))
-            .contentShape(RoundedRectangle(cornerRadius: 9))
             .disabled(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .opacity(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.48 : 1)
             .keyboardShortcut(.return, modifiers: .command)
@@ -1622,8 +1643,9 @@ struct RecordingPanelView: View {
         guard !trimmed.isEmpty else { return }
         capture.addNote(trimmed)
         noteDraft = ""
-        noteExpanded = false
-        noteFocused = false
+        // Keep the tray open: sending a note shouldn't close the notepad.
+        // (User: "note panel closes after initial send" was a bug.)
+        noteFocused = true
     }
 
     private func dismissPanelWindow() {
