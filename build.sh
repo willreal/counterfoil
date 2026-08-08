@@ -46,8 +46,14 @@ cp "${ICONSET_DIR}/icon_512x512.png" "${ICONSET_DIR}/icon_512x512@2x.png"
 
 iconutil -c icns "${ICONSET_DIR}" -o "${BUNDLE_DIR}/Contents/Resources/AppIcon.icns"
 
-echo "==> Ad-hoc signing"
-codesign --force --sign - "${BUNDLE_DIR}"
+echo "==> Signing (stable identity if available, else ad-hoc)"
+if security find-identity -p codesigning -v ~/Library/Keychains/cfoil-dev.keychain-db 2>/dev/null | grep -q "Counterfoil Dev"; then
+    security unlock-keychain -p devpass ~/Library/Keychains/cfoil-dev.keychain-db > /dev/null 2>&1
+    codesign --force --sign "Counterfoil Dev" --keychain ~/Library/Keychains/cfoil-dev.keychain-db "${BUNDLE_DIR}" \
+        || codesign --force --sign - "${BUNDLE_DIR}"
+else
+    codesign --force --sign - "${BUNDLE_DIR}"
+fi
 
 echo "==> Installing to /Applications"
 cp -R "${BUNDLE_DIR}" /Applications/

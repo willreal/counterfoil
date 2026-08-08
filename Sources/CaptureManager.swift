@@ -440,16 +440,16 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
         let file = try AVAudioFile(forWriting: url, settings: settings)
         micFile = file
 
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { buffer, _ in
+        // ONE tap on bus 0: writes the file AND computes the mic level.
+        // (Two taps with different buffer sizes on the same bus crash AVAudioEngine:
+        // "AUGraphNodeBaseV3::CreateRecordingTap" NSException — seen on MacBook.)
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+            guard let self else { return }
             do {
                 try file.write(from: buffer)
             } catch {
                 print("mic write error: \(error)")
             }
-        }
-
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            guard let self else { return }
             let frameLen = Int(buffer.frameLength)
             guard frameLen > 0,
                   let channelData = buffer.floatChannelData else { return }

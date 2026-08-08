@@ -379,6 +379,7 @@ struct ContentView: View {
             }
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)  // let coralBackground show through rows
         .background(coralBackground)
     }
 
