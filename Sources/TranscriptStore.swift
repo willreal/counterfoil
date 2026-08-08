@@ -83,7 +83,6 @@ class TranscriptStore: ObservableObject {
     @Published var selectedSession: String?
     @Published var searchQuery: String = ""
     @Published var orphanSessions: [OrphanInfo] = []
-    @Published var isImporting = false
     @Published var isRecovering = false
 
     private let fm = FileManager.default
@@ -370,75 +369,6 @@ class TranscriptStore: ObservableObject {
         }
         DispatchQueue.main.async {
             self.orphanSessions.removeAll(where: { $0.id == orphan.id })
-        }
-    }
-
-    // MARK: Import audio
-
-    func importAudio(url: URL) async {
-        await MainActor.run { self.isImporting = true }
-
-        let dayDir = CaptureManager.dayDir()
-        let baseTitle = url.deletingPathExtension().lastPathComponent
-        let sanitized = CaptureManager.sanitizeTitle(baseTitle.isEmpty ? "Imported" : baseTitle)
-        let dateStr = CaptureManager.formatDateTime(Date())
-        var stem = "\(sanitized) \(dateStr)"
-        var destURL = dayDir.appendingPathComponent("\(stem).m4a")
-
-        var counter = 1
-        while fm.fileExists(atPath: destURL.path) {
-            stem = "\(sanitized) \(dateStr) (\(counter))"
-            destURL = dayDir.appendingPathComponent("\(stem).m4a")
-            counter += 1
-        }
-
-        do {
-            try fm.copyItem(at: url, to: destURL)
-        } catch {
-            await MainActor.run { self.isImporting = false }
-            return
-        }
-
-        do {
-            let text = try await Transcriber.shared.transcribe(
-                filePath: destURL.path, startTime: Date())
-            let finalStem = stem
-            let finalText = text
-            await MainActor.run {
-                addSession(
-                    stem: finalStem,
-                    title: sanitized,
-                    dayDir: dayDir,
-                    startTime: Date(),
-                    systemText: finalText,
-                    micText: "",
-                    hasMicFile: false,
-                    duration: 0,
-                    flaggedOffsets: [],
-                    notes: [],
-                    totalPausedDuration: 0
-                )
-                self.isImporting = false
-            }
-        } catch {
-            let finalStem = stem
-            let errorMsg = error.localizedDescription
-            await MainActor.run {
-                addSession(
-                    stem: finalStem,
-                    title: sanitized,
-                    dayDir: dayDir,
-                    startTime: Date(),
-                    systemText: "[transcribe error: \(errorMsg)]",
-                    micText: "",
-                    hasMicFile: false,
-                    duration: 0,
-                    flaggedOffsets: [],
-                    notes: [],
-                    totalPausedDuration: 0
-                )
-                self.isImporting = false
-            }
         }
     }
 
