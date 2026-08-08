@@ -22,9 +22,64 @@ struct OrphanInfo: Identifiable {
     let modDate: Date
 }
 
+enum TranscriptAnnotationKind: Equatable {
+    case flag
+    case note
+}
+
+struct TranscriptAnnotation {
+    let timestamp: TimeInterval
+    let kind: TranscriptAnnotationKind
+    let text: String?
+}
+
+struct StoredTranscriptNote: Identifiable, Equatable {
+    let id: Int
+    let timestamp: TimeInterval
+    var text: String
+}
+
+struct TranscriptAnnotations {
+    var flags: [TimeInterval] = []
+    var notes: [StoredTranscriptNote] = []
+}
+
+func transcriptAnnotation(from rawLine: String) -> TranscriptAnnotation? {
+    let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+    guard let open = trimmed.firstIndex(of: "["),
+          let close = trimmed.firstIndex(of: "]"),
+          close > open else { return nil }
+
+    let timestampText = String(trimmed[trimmed.index(after: open)..<close])
+    let parts = timestampText.split(separator: ":").compactMap { Int($0) }
+    guard parts.count == 3 else { return nil }
+    let timestamp = TimeInterval(parts[0] * 3600 + parts[1] * 60 + parts[2])
+
+    var payload = String(trimmed[trimmed.index(after: close)...])
+        .trimmingCharacters(in: .whitespaces)
+    while payload.hasPrefix("**") {
+        payload.removeFirst(2)
+    }
+    while payload.hasSuffix("**") {
+        payload.removeLast(2)
+    }
+    payload = payload.trimmingCharacters(in: .whitespaces)
+
+    if payload == "[FLAG]" {
+        return TranscriptAnnotation(timestamp: timestamp, kind: .flag, text: nil)
+    }
+    if payload.hasPrefix("NOTE:") {
+        let noteText = String(payload.dropFirst("NOTE:".count))
+            .trimmingCharacters(in: .whitespaces)
+        return TranscriptAnnotation(timestamp: timestamp, kind: .note, text: noteText)
+    }
+    return nil
+}
+
 class TranscriptStore: ObservableObject {
     @Published var sessions: [Session] = []
     @Published var transcriptContent: [String: String] = [:]
+    @Published private(set) var sessionAnnotations: [String: TranscriptAnnotations] = [:]
     @Published var selectedSession: String?
     @Published var searchQuery: String = ""
     @Published var orphanSessions: [OrphanInfo] = []
@@ -428,6 +483,7 @@ class TranscriptStore: ObservableObject {
             // the sidebar Binding setter that normally calls loadTranscript)
             if let content = try? String(contentsOf: mdPath, encoding: .utf8) {
                 self.transcriptContent[session.id] = content
+                self.refreshAnnotations(for: session.id, content: content)
             }
         }
     }
@@ -436,6 +492,46 @@ class TranscriptStore: ObservableObject {
         let mdPath = (session.dayDir as NSString).appendingPathComponent("\(session.stem).md")
         if let content = try? String(contentsOfFile: mdPath, encoding: .utf8) {
             transcriptContent[session.id] = content
+            refreshAnnotations(for: session.id, content: content)
+        }
+    }
+
+    func removeFlag(from session: Session, at lineIndex: Int) {
+        rewriteTranscript(for: session, at: lineIndex) { lines, index in
+            guard let annotation = transcriptAnnotation(from: lines[index]), annotation.kind == .flag else {
+                return nil
+            }
+            var updatedLines = lines
+            updatedLines.remove(at: index)
+            return updatedLines
+        }
+    }
+
+    func removeNote(from session: Session, at lineIndex: Int) {
+        rewriteTranscript(for: session, at: lineIndex) { lines, index in
+            guard let annotation = transcriptAnnotation(from: lines[index]), annotation.kind == .note else {
+                return nil
+            }
+            var updatedLines = lines
+            updatedLines.remove(at: index)
+            return updatedLines
+        }
+    }
+
+    func updateNote(in session: Session, at lineIndex: Int, with text: String) {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty else {
+            removeNote(from: session, at: lineIndex)
+            return
+        }
+
+        rewriteTranscript(for: session, at: lineIndex) { lines, index in
+            guard let annotation = transcriptAnnotation(from: lines[index]), annotation.kind == .note else {
+                return nil
+            }
+            var updatedLines = lines
+            updatedLines[index] = replacingNoteText(in: lines[index], with: trimmedText)
+            return updatedLines
         }
     }
 
@@ -485,6 +581,8 @@ class TranscriptStore: ObservableObject {
         }
         DispatchQueue.main.async {
             self.sessions.removeAll(where: { $0.id == session.id })
+            self.transcriptContent.removeValue(forKey: session.id)
+            self.sessionAnnotations.removeValue(forKey: session.id)
             if self.selectedSession == session.id {
                 self.selectedSession = nil
             }
@@ -497,7 +595,7 @@ class TranscriptStore: ObservableObject {
 
     func autoDeleteOldAudio() {
         if !SettingsStore.shared.autoDeleteEnabled { return }
-        let cutoff = Date().addingTimeInterval(-7 * 24 * 3600)
+        let cutoff = Date().addingTimeInterval(-30 * 24 * 3600)
         for session in sessions {
             guard session.hasSystemFile || session.hasMicFile else { continue }
             let sysPaths = [
@@ -534,6 +632,69 @@ class TranscriptStore: ObservableObject {
                 self?.autoDeleteOldAudio()
             }
         }
+    }
+
+    private func refreshAnnotations(for sessionID: String, content: String) {
+        var annotations = TranscriptAnnotations()
+        for (lineIndex, rawLine) in content.components(separatedBy: "\n").enumerated() {
+            guard let annotation = transcriptAnnotation(from: rawLine) else { continue }
+            switch annotation.kind {
+            case .flag:
+                annotations.flags.append(annotation.timestamp)
+            case .note:
+                annotations.notes.append(StoredTranscriptNote(
+                    id: lineIndex,
+                    timestamp: annotation.timestamp,
+                    text: annotation.text ?? ""
+                ))
+            }
+        }
+        sessionAnnotations[sessionID] = annotations
+    }
+
+    private func rewriteTranscript(
+        for session: Session,
+        at lineIndex: Int,
+        transform: ([String], Int) -> [String]?
+    ) {
+        let mdURL = URL(fileURLWithPath: session.dayDir, isDirectory: true)
+            .appendingPathComponent(session.stem + ".md")
+        let content: String
+        if let loaded = transcriptContent[session.id] {
+            content = loaded
+        } else if let loaded = try? String(contentsOf: mdURL, encoding: .utf8) {
+            content = loaded
+        } else {
+            return
+        }
+
+        let lines = content.components(separatedBy: "\n")
+        guard lines.indices.contains(lineIndex), let updatedLines = transform(lines, lineIndex) else {
+            return
+        }
+
+        let updatedContent = updatedLines.joined(separator: "\n")
+        guard let data = updatedContent.data(using: .utf8) else { return }
+        do {
+            try data.write(to: mdURL, options: [.atomic])
+            transcriptContent[session.id] = updatedContent
+            refreshAnnotations(for: session.id, content: updatedContent)
+        } catch {
+            print("transcript rewrite error: \(error)")
+        }
+    }
+
+    private func replacingNoteText(in rawLine: String, with text: String) -> String {
+        let leading = String(rawLine.prefix { $0 == " " || $0 == "\t" })
+        let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+        guard let open = trimmed.firstIndex(of: "["),
+              let close = trimmed.firstIndex(of: "]"),
+              close > open else { return rawLine }
+
+        let timestampToken = String(trimmed[open...close])
+        let isBold = trimmed.hasPrefix("**") && trimmed.hasSuffix("**")
+        let replacement = timestampToken + " NOTE: " + text
+        return leading + (isBold ? "**" : "") + replacement + (isBold ? "**" : "")
     }
 
     private func mdHeader(title: String, startTime: Date, duration: TimeInterval,

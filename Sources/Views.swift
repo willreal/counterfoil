@@ -6,6 +6,10 @@ import UniformTypeIdentifiers
 
 private let counterfoilRed = Color(red: 1.0, green: 0.231, blue: 0.188)
 private let counterfoilCoral = Color(red: 0.86, green: 0.43, blue: 0.37)
+private let counterfoilRecordingNoteAccent = Color.white.opacity(0.88)
+// Notes are white/light in the dark recording glass; use the adaptive label
+// equivalent in the transcript so that same neutral identity stays visible.
+private let counterfoilTranscriptNoteAccent = Color(nsColor: .secondaryLabelColor)
 
 func formatDuration(_ duration: TimeInterval) -> String {
     let totalSeconds = max(0, Int(duration))
@@ -161,9 +165,38 @@ struct TranscriptLineItem: Identifiable {
     let speaker: TranscriptSpeaker?
     let isAnnotation: Bool
     let isFlag: Bool
+    let isNote: Bool
     let isHeader: Bool
     let isMeta: Bool
     let isEmpty: Bool
+
+    init(
+        text: String,
+        timestamp: TimeInterval?,
+        raw: String,
+        speaker: TranscriptSpeaker?,
+        isAnnotation: Bool,
+        isFlag: Bool,
+        isHeader: Bool,
+        isMeta: Bool,
+        isEmpty: Bool,
+        isNote: Bool = false,
+        lineIndex: Int = 0
+    ) {
+        self.text = text
+        self.timestamp = timestamp
+        self.raw = raw
+        self.speaker = speaker
+        self.isAnnotation = isAnnotation
+        self.isFlag = isFlag
+        self.isNote = isNote
+        self.isHeader = isHeader
+        self.isMeta = isMeta
+        self.isEmpty = isEmpty
+        self.lineIndex = lineIndex
+    }
+
+    let lineIndex: Int
 }
 
 struct ContentView: View {
@@ -175,14 +208,22 @@ struct ContentView: View {
     @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding = false
 
     @StateObject private var player = TranscriptPlayer()
-    @StateObject private var waveformStore = WaveformStore()
     @State private var showingDeleteAudioConfirm = false
     @State private var showingDeleteEverythingConfirm = false
     @State private var sessionToDelete: Session?
     @State private var titleText = ""
     @State private var showImportPicker = false
     @State private var collapsedDays: Set<String> = []
+    @State private var editingNoteSessionID: String?
+    @State private var editingNoteLineIndex: Int?
+    @State private var noteEditText = ""
     @FocusState private var searchFocused: Bool
+    @FocusState private var noteEditFocused: Bool
+
+    private var selectedMeeting: Session? {
+        guard let id = store.selectedSession else { return nil }
+        return store.sessions.first(where: { $0.id == id })
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -195,6 +236,55 @@ struct ContentView: View {
             detailPane
         }
         .navigationSplitViewStyle(.balanced)
+        .toolbar {
+            ToolbarItemGroup(placement: .automatic) {
+                Button {
+                    guard let session = selectedMeeting else { return }
+                    copyTranscript(session: session)
+                } label: {
+                    toolbarButtonLabel("Copy Transcript", systemImage: "doc.on.doc")
+                }
+                .buttonStyle(.plain)
+                .disabled(selectedMeeting == nil || selectedMeeting?.hasTranscript != true)
+                .help("Copy Transcript")
+
+                Button {
+                    guard let session = selectedMeeting else { return }
+                    revealInFinder(session: session)
+                } label: {
+                    toolbarButtonLabel("Reveal in Finder", systemImage: "folder")
+                }
+                .buttonStyle(.plain)
+                .disabled(selectedMeeting == nil)
+                .help("Reveal in Finder")
+
+                Menu {
+                    Button {
+                        guard let session = selectedMeeting else { return }
+                        sessionToDelete = session
+                        showingDeleteAudioConfirm = true
+                    } label: {
+                        Label("Delete Audio", systemImage: "trash")
+                    }
+                    Button(role: .destructive) {
+                        guard let session = selectedMeeting else { return }
+                        sessionToDelete = session
+                        showingDeleteEverythingConfirm = true
+                    } label: {
+                        Label("Delete Everything", systemImage: "trash.fill")
+                    }
+                } label: {
+                    toolbarDeleteLabel
+                }
+                .menuStyle(.borderlessButton)
+                .disabled(selectedMeeting == nil)
+                .help("Delete")
+            }
+
+            ToolbarItem(placement: .primaryAction) {
+                toolbarSearch
+            }
+        }
         .tint(counterfoilRed)
         .sheet(isPresented: $capture.showTitlePrompt) {
             titleSheet
@@ -238,12 +328,22 @@ struct ContentView: View {
                 }
             }
         }
+        .alert("Delete Audio?", isPresented: $showingDeleteAudioConfirm, presenting: sessionToDelete) { session in
+            Button("Cancel", role: .cancel) {}
+            Button("Delete Audio", role: .destructive) { store.deleteAudioFiles(session) }
+        } message: { _ in
+            Text("The audio files (.m4a) will be moved to Trash. The transcript will be kept.")
+        }
+        .alert("Delete Everything?", isPresented: $showingDeleteEverythingConfirm, presenting: sessionToDelete) { session in
+            Button("Cancel", role: .cancel) {}
+            Button("Delete All", role: .destructive) { store.deleteEverything(session) }
+        } message: { _ in
+            Text("The audio files and transcript will be moved to Trash.")
+        }
     }
 
     private var sidebar: some View {
         VStack(spacing: 0) {
-            sidebarSearch
-
             List(selection: Binding(
                 get: { store.selectedSession },
                 set: { store.selectedSession = $0 }
@@ -291,12 +391,12 @@ struct ContentView: View {
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
-    private var sidebarSearch: some View {
+    private var toolbarSearch: some View {
         HStack(spacing: 7) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
-            TextField("Search meetings", text: $store.searchQuery)
+            TextField("Titles, Transcripts", text: $store.searchQuery)
                 .textFieldStyle(.plain)
                 .focused($searchFocused)
             if !store.searchQuery.isEmpty {
@@ -311,11 +411,42 @@ struct ContentView: View {
             }
         }
         .padding(.horizontal, 9)
-        .frame(height: 30)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 7)
+        .frame(width: 215, height: 28)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(0.11), lineWidth: 1)
+        }
+        .help("Search titles and transcripts")
+    }
+
+    private func toolbarButtonLabel(_ title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.system(size: 12, weight: .medium))
+            .padding(.horizontal, 8)
+            .frame(height: 27)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.primary.opacity(0.11), lineWidth: 1)
+            }
+    }
+
+    private var toolbarDeleteLabel: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "trash")
+            Text("Delete")
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+        }
+        .font(.system(size: 12, weight: .medium))
+        .padding(.horizontal, 8)
+        .frame(height: 27)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(0.11), lineWidth: 1)
+        }
     }
 
     private var sidebarFooter: some View {
@@ -446,37 +577,20 @@ struct ContentView: View {
     }
 
     private func sessionRow(_ session: Session) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(session.title)
                     .font(.system(.body, design: .rounded).weight(.semibold))
                     .lineLimit(1)
                 Spacer(minLength: 0)
-                if session.hasTranscript {
-                    Image(systemName: "doc.text")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+                Text(formatDuration(session.duration))
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
             }
 
-            HStack(spacing: 5) {
-                Text(formatTimeOnly(session.startTime))
-                if session.duration > 0 {
-                    Text("·")
-                    Text(formatDuration(session.duration))
-                }
-                if !session.hasSystemFile && !session.hasMicFile {
-                    Text("· transcript only")
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-
-            WaveformStrip(
-                peaks: waveformStore.peaks(for: session),
-                color: store.selectedSession == session.id ? counterfoilCoral.opacity(0.62) : Color.secondary.opacity(0.42)
-            )
-            .frame(height: 15)
+            Text(formatRecordedDate(session.startTime))
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             if !store.searchQuery.isEmpty, let context = store.searchContext(for: session) {
                 Text(context)
@@ -488,8 +602,22 @@ struct ContentView: View {
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .tag(session.id)
-        .onAppear { waveformStore.request(for: session) }
         .contextMenu {
+            Button {
+                copyTranscript(session: session)
+            } label: {
+                Label("Copy Transcript", systemImage: "doc.on.doc")
+            }
+            .disabled(!session.hasTranscript)
+
+            Button {
+                revealInFinder(session: session)
+            } label: {
+                Label("Show in Finder", systemImage: "folder")
+            }
+
+            Divider()
+
             Button {
                 sessionToDelete = session
                 showingDeleteAudioConfirm = true
@@ -503,18 +631,6 @@ struct ContentView: View {
             } label: {
                 Label("Delete Everything", systemImage: "trash.fill")
             }
-        }
-        .alert("Delete Audio?", isPresented: $showingDeleteAudioConfirm, presenting: sessionToDelete) { session in
-            Button("Cancel", role: .cancel) {}
-            Button("Delete Audio", role: .destructive) { store.deleteAudioFiles(session) }
-        } message: { _ in
-            Text("The audio files (.m4a) will be moved to Trash. The transcript will be kept.")
-        }
-        .alert("Delete Everything?", isPresented: $showingDeleteEverythingConfirm, presenting: sessionToDelete) { session in
-            Button("Cancel", role: .cancel) {}
-            Button("Delete All", role: .destructive) { store.deleteEverything(session) }
-        } message: { _ in
-            Text("The audio files and transcript will be moved to Trash.")
         }
     }
 
@@ -619,72 +735,11 @@ struct ContentView: View {
 
     private func transcriptView(session: Session) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 18) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(session.title)
-                        .font(.system(.title2, design: .rounded).weight(.semibold))
-                    HStack(spacing: 9) {
-                        Text(session.startTime, style: .date)
-                        Text("·")
-                        if session.duration > 0 {
-                            Text(formatDuration(session.duration))
-                        } else {
-                            Text("Transcript")
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
-
-                HStack(spacing: 5) {
-                    if session.hasTranscript {
-                        Button {
-                            copyTranscript(session: session)
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                        }
-                        .buttonStyle(.plain)
-                        .help("Copy transcript")
-
-                        Button {
-                            revealInFinder(session: session)
-                        } label: {
-                            Image(systemName: "folder")
-                        }
-                        .buttonStyle(.plain)
-                        .help("Reveal in Finder")
-                    }
-
-                    Menu {
-                        Button {
-                            sessionToDelete = session
-                            showingDeleteAudioConfirm = true
-                        } label: {
-                            Label("Delete Audio", systemImage: "trash")
-                        }
-                        Button(role: .destructive) {
-                            sessionToDelete = session
-                            showingDeleteEverythingConfirm = true
-                        } label: {
-                            Label("Delete Everything", systemImage: "trash.fill")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .help("Meeting actions")
-                }
-                .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 34)
-            .padding(.top, 28)
-            .padding(.bottom, 18)
-
             if player.hasAudio {
                 transportBar(session: session)
                     .padding(.horizontal, 31)
-                    .padding(.bottom, 19)
+                    .padding(.top, 18)
+                    .padding(.bottom, 18)
             }
 
             Divider()
@@ -771,6 +826,7 @@ struct ContentView: View {
 
     private func transcriptBody(session: Session) -> some View {
         let lines = parseTranscriptLines(store.transcriptContent[session.id] ?? "")
+            .filter { !$0.isHeader && !$0.isMeta }
         let flags = lines.filter { $0.isFlag && $0.timestamp != nil }
         let latestTimestamp = lines.compactMap(\.timestamp).max() ?? 0
         let totalTime = max(session.duration, max(player.duration, max(latestTimestamp, 1)))
@@ -780,7 +836,7 @@ struct ContentView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(lines) { line in
-                        transcriptLine(line, activeLineID: activeLineID)
+                        transcriptLine(line, session: session, activeLineID: activeLineID)
                     }
                 }
                 .padding(.horizontal, 31)
@@ -805,40 +861,15 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func transcriptLine(_ line: TranscriptLineItem, activeLineID: UUID?) -> some View {
+    private func transcriptLine(
+        _ line: TranscriptLineItem,
+        session: Session,
+        activeLineID: UUID?
+    ) -> some View {
         if line.isEmpty {
             Spacer().frame(height: 7).id(line.id)
-        } else if line.isHeader {
-            Text(parseMarkdown(line.raw))
-                .font(.system(.title3, design: .rounded).weight(.semibold))
-                .padding(.top, 2)
-                .padding(.bottom, 9)
-                .id(line.id)
-        } else if line.isMeta {
-            Text(parseMarkdown(line.raw))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.bottom, 9)
-                .id(line.id)
         } else if line.isAnnotation {
-            HStack(spacing: 8) {
-                Image(systemName: line.isFlag ? "flag.fill" : "note.text")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(line.isFlag ? counterfoilRed : counterfoilCoral)
-                Text(line.text)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                if let timestamp = line.timestamp {
-                    Text(formatTimestamp(timestamp))
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
-            .padding(.vertical, 4)
+            annotationLine(line, session: session)
             .id(line.id)
         } else {
             Button {
@@ -851,6 +882,112 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .disabled(!player.hasAudio || line.timestamp == nil)
             .id(line.id)
+        }
+    }
+
+    @ViewBuilder
+    private func annotationLine(_ line: TranscriptLineItem, session: Session) -> some View {
+        if line.isNote && editingNoteSessionID == session.id && editingNoteLineIndex == line.lineIndex {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Capsule()
+                        .fill(counterfoilTranscriptNoteAccent)
+                        .frame(width: 3)
+                    Image(systemName: "note.text")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(counterfoilTranscriptNoteAccent)
+                    Text("Note")
+                        .font(.caption.weight(.semibold))
+                    Spacer(minLength: 0)
+                    if let timestamp = line.timestamp {
+                        Text(formatTimestamp(timestamp))
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
+                TextEditor(text: $noteEditText)
+                    .font(.caption)
+                    .scrollContentBackground(.hidden)
+                    .focused($noteEditFocused)
+                    .frame(minHeight: 42, maxHeight: 110)
+                    .padding(4)
+                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    Button("Cancel") {
+                        cancelNoteEditing()
+                    }
+                    .buttonStyle(.bordered)
+                    Button("Save") {
+                        saveNoteEditing(session: session, line: line)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(counterfoilRed)
+                    .keyboardShortcut(.return, modifiers: [.command])
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(counterfoilTranscriptNoteAccent.opacity(0.11), in: RoundedRectangle(cornerRadius: 8))
+            .padding(.vertical, 4)
+        } else {
+            HStack(alignment: .top, spacing: 9) {
+                Capsule()
+                    .fill(line.isFlag ? Color.secondary.opacity(0.62) : counterfoilTranscriptNoteAccent)
+                    .frame(width: 3)
+
+                Image(systemName: line.isFlag ? "flag.fill" : "note.text")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(line.isFlag ? Color.secondary : counterfoilTranscriptNoteAccent)
+                    .padding(.top, 1)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(line.text)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if let timestamp = line.timestamp {
+                        Text(formatTimestamp(timestamp))
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(
+                (line.isFlag ? Color.primary.opacity(0.045) : counterfoilTranscriptNoteAccent.opacity(0.11)),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if line.isNote {
+                    beginNoteEditing(session: session, line: line)
+                }
+            }
+            .contextMenu {
+                if line.isFlag {
+                    Button(role: .destructive) {
+                        store.removeFlag(from: session, at: line.lineIndex)
+                    } label: {
+                        Label("Remove Flag", systemImage: "flag.slash")
+                    }
+                } else if line.isNote {
+                    Button {
+                        beginNoteEditing(session: session, line: line)
+                    } label: {
+                        Label("Edit Note", systemImage: "pencil")
+                    }
+                    Button(role: .destructive) {
+                        store.removeNote(from: session, at: line.lineIndex)
+                    } label: {
+                        Label("Remove Note", systemImage: "trash")
+                    }
+                }
+            }
         }
     }
 
@@ -914,6 +1051,28 @@ struct ContentView: View {
         return active
     }
 
+    private func beginNoteEditing(session: Session, line: TranscriptLineItem) {
+        guard line.isNote else { return }
+        editingNoteSessionID = session.id
+        editingNoteLineIndex = line.lineIndex
+        noteEditText = line.text
+        DispatchQueue.main.async {
+            noteEditFocused = true
+        }
+    }
+
+    private func cancelNoteEditing() {
+        noteEditFocused = false
+        editingNoteSessionID = nil
+        editingNoteLineIndex = nil
+        noteEditText = ""
+    }
+
+    private func saveNoteEditing(session: Session, line: TranscriptLineItem) {
+        store.updateNote(in: session, at: line.lineIndex, with: noteEditText)
+        cancelNoteEditing()
+    }
+
     private func parseTranscriptLines(_ markdown: String) -> [TranscriptLineItem] {
         var items: [TranscriptLineItem] = []
         let trimmedMarkdown = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -921,58 +1080,64 @@ struct ContentView: View {
             ? "No transcript available"
             : markdown
 
-        for raw in normalizedMarkdown.components(separatedBy: "\n") {
+        for (lineIndex, raw) in normalizedMarkdown.components(separatedBy: "\n").enumerated() {
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty {
-                items.append(TranscriptLineItem(text: "", timestamp: nil, raw: raw, speaker: nil, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: true))
+                items.append(TranscriptLineItem(text: "", timestamp: nil, raw: raw, speaker: nil, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: true, lineIndex: lineIndex))
                 continue
             }
             if trimmed.hasPrefix("# ") {
-                items.append(TranscriptLineItem(text: trimmed, timestamp: nil, raw: raw, speaker: nil, isAnnotation: false, isFlag: false, isHeader: true, isMeta: false, isEmpty: false))
+                items.append(TranscriptLineItem(text: trimmed, timestamp: nil, raw: raw, speaker: nil, isAnnotation: false, isFlag: false, isHeader: true, isMeta: false, isEmpty: false, lineIndex: lineIndex))
                 continue
             }
             if trimmed.hasPrefix("*") && trimmed.hasSuffix("*") && !trimmed.hasPrefix("**[") {
-                items.append(TranscriptLineItem(text: trimmed, timestamp: nil, raw: raw, speaker: nil, isAnnotation: false, isFlag: false, isHeader: false, isMeta: true, isEmpty: false))
+                items.append(TranscriptLineItem(text: trimmed, timestamp: nil, raw: raw, speaker: nil, isAnnotation: false, isFlag: false, isHeader: false, isMeta: true, isEmpty: false, lineIndex: lineIndex))
                 continue
             }
 
             guard let open = trimmed.firstIndex(of: "["),
                   let close = trimmed.firstIndex(of: "]"), close > open else {
-                items.append(TranscriptLineItem(text: trimmed, timestamp: nil, raw: raw, speaker: nil, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false))
+                items.append(TranscriptLineItem(text: trimmed, timestamp: nil, raw: raw, speaker: nil, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false, lineIndex: lineIndex))
                 continue
             }
 
             let timestampText = String(trimmed[trimmed.index(after: open)..<close])
             let parts = timestampText.split(separator: ":").compactMap { Int($0) }
             guard parts.count == 3 else {
-                items.append(TranscriptLineItem(text: trimmed, timestamp: nil, raw: raw, speaker: nil, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false))
+                items.append(TranscriptLineItem(text: trimmed, timestamp: nil, raw: raw, speaker: nil, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false, lineIndex: lineIndex))
                 continue
             }
             let timestamp = TimeInterval(parts[0] * 3600 + parts[1] * 60 + parts[2])
+
+            if let annotation = transcriptAnnotation(from: raw) {
+                switch annotation.kind {
+                case .flag:
+                    items.append(TranscriptLineItem(text: "Flagged moment", timestamp: timestamp, raw: raw, speaker: nil, isAnnotation: true, isFlag: true, isHeader: false, isMeta: false, isEmpty: false, lineIndex: lineIndex))
+                case .note:
+                    items.append(TranscriptLineItem(text: annotation.text ?? "", timestamp: timestamp, raw: raw, speaker: nil, isAnnotation: true, isFlag: false, isHeader: false, isMeta: false, isEmpty: false, isNote: true, lineIndex: lineIndex))
+                }
+                continue
+            }
+
             var payload = String(trimmed[trimmed.index(after: close)...]).trimmingCharacters(in: .whitespaces)
             if payload.hasPrefix("**") { payload.removeFirst(2) }
             if payload.hasSuffix("**") { payload.removeLast(2) }
             payload = payload.trimmingCharacters(in: .whitespaces)
 
-            if payload == "[FLAG]" {
-                items.append(TranscriptLineItem(text: "Flagged moment", timestamp: timestamp, raw: raw, speaker: nil, isAnnotation: true, isFlag: true, isHeader: false, isMeta: false, isEmpty: false))
-            } else if payload.hasPrefix("NOTE:") {
-                let note = String(payload.dropFirst("NOTE:".count)).trimmingCharacters(in: .whitespaces)
-                items.append(TranscriptLineItem(text: note, timestamp: timestamp, raw: raw, speaker: nil, isAnnotation: true, isFlag: false, isHeader: false, isMeta: false, isEmpty: false))
-            } else if payload.hasPrefix("You:**") {
+            if payload.hasPrefix("You:**") {
                 let text = String(payload.dropFirst("You:**".count)).trimmingCharacters(in: .whitespaces)
-                items.append(TranscriptLineItem(text: text, timestamp: timestamp, raw: raw, speaker: .you, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false))
+                items.append(TranscriptLineItem(text: text, timestamp: timestamp, raw: raw, speaker: .you, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false, lineIndex: lineIndex))
             } else if payload.hasPrefix("Them:**") {
                 let text = String(payload.dropFirst("Them:**".count)).trimmingCharacters(in: .whitespaces)
-                items.append(TranscriptLineItem(text: text, timestamp: timestamp, raw: raw, speaker: .them, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false))
+                items.append(TranscriptLineItem(text: text, timestamp: timestamp, raw: raw, speaker: .them, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false, lineIndex: lineIndex))
             } else if payload.hasPrefix("You:") {
                 let text = String(payload.dropFirst("You:".count)).trimmingCharacters(in: .whitespaces)
-                items.append(TranscriptLineItem(text: text, timestamp: timestamp, raw: raw, speaker: .you, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false))
+                items.append(TranscriptLineItem(text: text, timestamp: timestamp, raw: raw, speaker: .you, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false, lineIndex: lineIndex))
             } else if payload.hasPrefix("Them:") {
                 let text = String(payload.dropFirst("Them:".count)).trimmingCharacters(in: .whitespaces)
-                items.append(TranscriptLineItem(text: text, timestamp: timestamp, raw: raw, speaker: .them, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false))
+                items.append(TranscriptLineItem(text: text, timestamp: timestamp, raw: raw, speaker: .them, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: false, lineIndex: lineIndex))
             } else {
-                items.append(TranscriptLineItem(text: payload, timestamp: timestamp, raw: raw, speaker: nil, isAnnotation: true, isFlag: false, isHeader: false, isMeta: false, isEmpty: false))
+                items.append(TranscriptLineItem(text: payload, timestamp: timestamp, raw: raw, speaker: nil, isAnnotation: true, isFlag: false, isHeader: false, isMeta: false, isEmpty: false, lineIndex: lineIndex))
             }
         }
         return items
@@ -1021,10 +1186,6 @@ struct ContentView: View {
         }
     }
 
-    private func parseMarkdown(_ markdown: String) -> AttributedString {
-        (try? AttributedString(markdown: markdown, options: .init())) ?? AttributedString(markdown)
-    }
-
     private func copyTranscript(session: Session) {
         let content: String?
         if let loaded = store.transcriptContent[session.id] {
@@ -1054,10 +1215,14 @@ struct ContentView: View {
         }
     }
 
-    private func formatTimeOnly(_ date: Date) -> String {
+    private func formatRecordedDate(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-        return formatter.string(from: date)
+        formatter.dateFormat = "MMM d, yyyy"
+
+        let hour = Calendar.current.component(.hour, from: date)
+        let displayHour = hour % 12 == 0 ? 12 : hour % 12
+        let period = hour >= 12 ? "pm" : "am"
+        return formatter.string(from: date) + " · ~" + String(displayHour) + period
     }
 
     private func showSettingsWindow() {
@@ -1349,7 +1514,7 @@ struct RecordingPanelView: View {
 
             panelControl(
                 systemName: noteExpanded ? "note.text" : "note.text.badge.plus",
-                tint: Color.white.opacity(0.88),
+                tint: counterfoilRecordingNoteAccent,
                 help: "Add note"
             ) {
                 noteExpanded.toggle()
@@ -1751,7 +1916,7 @@ struct GeneralSettingsView: View {
                 }
 
                 GroupBox {
-                    Toggle("Automatically delete audio after 7 days", isOn: $settings.autoDeleteEnabled)
+                    Toggle("Automatically delete audio after 30 days", isOn: $settings.autoDeleteEnabled)
                     Text("Transcripts are always kept. Older audio is moved to Trash when this is enabled.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
