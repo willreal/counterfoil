@@ -49,6 +49,33 @@ class TranscriptStore: ObservableObject {
         }
     }
 
+    /// Returns the most useful one-line context for a sidebar search hit.
+    /// Title/filename hits get a quiet explanation; transcript hits use the
+    /// matching markdown line so the result is actionable at a glance.
+    func searchContext(for session: Session) -> String? {
+        guard !searchQuery.isEmpty else { return nil }
+        let query = searchQuery.lowercased()
+
+        if session.title.lowercased().contains(query) || session.stem.lowercased().contains(query) {
+            return "Title match · \(session.stem)"
+        }
+
+        let mdPath = (session.dayDir as NSString).appendingPathComponent("\(session.stem).md")
+        guard let content = try? String(contentsOfFile: mdPath, encoding: .utf8) else { return nil }
+        for rawLine in content.components(separatedBy: .newlines) {
+            guard rawLine.lowercased().contains(query) else { continue }
+            let line = rawLine
+                .replacingOccurrences(of: "**", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { continue }
+            if line.count > 94 {
+                return String(line.prefix(91)) + "…"
+            }
+            return line
+        }
+        return nil
+    }
+
     func loadSessions() async {
         let baseDir = CaptureManager.baseDir
         var found: [Session] = []
@@ -399,7 +426,7 @@ class TranscriptStore: ObservableObject {
             // load the transcript content NOW so the detail pane doesn't
             // sit on "Loading..." (selection set programmatically bypasses
             // the sidebar Binding setter that normally calls loadTranscript)
-            if let content = try? String(contentsOfFile: mdPath, encoding: .utf8) {
+            if let content = try? String(contentsOf: mdPath, encoding: .utf8) {
                 self.transcriptContent[session.id] = content
             }
         }

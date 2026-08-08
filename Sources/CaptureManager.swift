@@ -3,6 +3,7 @@ import ScreenCaptureKit
 import AVFoundation
 import SwiftUI
 import Combine
+import AppKit
 
 class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
     @Published var isRecording = false
@@ -10,8 +11,10 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
     @Published var status = "Ready"
     @Published var recordingDuration: TimeInterval = 0
     @Published var recordingStartTime: Date?
+    @Published var activeTitle = ""
     @Published var showTitlePrompt = false
     @Published var micLevel: CGFloat = 0
+    @Published var micSamples: [CGFloat] = Array(repeating: 0, count: 72)
     @Published var showLowDiskAlert = false
 
     private var stream: SCStream?
@@ -88,12 +91,21 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
     func flagCurrentMoment() {
         guard isRecording, !isPaused else { return }
         flaggedOffsets.append(currentElapsedTime())
+        CounterfoilSound.play("Tink")
     }
 
     func addNote(_ text: String) {
         guard isRecording else { return }
         let t = currentElapsedTime()
         notes.append((t, text))
+    }
+
+    func updateActiveTitle(_ title: String) {
+        guard isRecording else { return }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        sessionTitle = String(trimmed.prefix(100))
+        activeTitle = sessionTitle
     }
 
     func start(title: String) {
@@ -117,17 +129,23 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
     private func startInternal(title: String) {
         let now = Date()
         recordingStartTime = now
-        let sanitized = Self.sanitizeTitle(title)
+        let displayTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeDisplayTitle = displayTitle.isEmpty ? "Meeting" : String(displayTitle.prefix(100))
+        let sanitizedTitle = Self.sanitizeTitle(safeDisplayTitle)
+        let sanitized = sanitizedTitle.isEmpty ? "Meeting" : sanitizedTitle
         let dateStr = Self.formatDateTime(now)
         let stem = "\(sanitized) \(dateStr)"
         sessionStem = stem
-        sessionTitle = title
+        sessionTitle = safeDisplayTitle
+        activeTitle = safeDisplayTitle
         sessionDir = Self.dayDir(date: now)
         systemFileURL = sessionDir!.appendingPathComponent("\(stem).m4a")
         micFileURL = sessionDir!.appendingPathComponent("\(stem).mic.m4a")
 
         totalPausedDuration = 0
         pauseStartTime = nil
+        micLevel = 0
+        micSamples = Array(repeating: 0, count: 72)
         flaggedOffsets = []
         notes = []
         segmentSystemURLs = [systemFileURL!]
@@ -149,6 +167,7 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
                     self.isRecording = true
                     self.status = "Recording"
                     self.startDurationTimer()
+                    CounterfoilSound.play("Pop")
                 }
             } catch {
                 endActivityToken()
@@ -227,6 +246,7 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
 
     func stop(store: TranscriptStore) {
         guard isRecording else { return }
+        CounterfoilSound.play("Tink")
         let stem = sessionStem
         let dir = sessionDir
         let startTime = recordingStartTime ?? Date()
@@ -332,6 +352,9 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
                     )
                     self.status = "Ready"
                     self.recordingDuration = 0
+                    self.activeTitle = ""
+                    self.micLevel = 0
+                    self.micSamples = Array(repeating: 0, count: 72)
                     self.sessionStem = ""
                     self.sessionTitle = ""
                     self.systemFileURL = nil
@@ -463,6 +486,10 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
             let level = min(rms * 4, 1.0)
             DispatchQueue.main.async {
                 self.micLevel = CGFloat(level)
+                self.micSamples.append(CGFloat(level))
+                if self.micSamples.count > 72 {
+                    self.micSamples.removeFirst(self.micSamples.count - 72)
+                }
             }
         }
 
@@ -516,6 +543,14 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
                 finished = true
             }
         }
+    }
+}
+
+private enum CounterfoilSound {
+    static func play(_ name: String) {
+        let path = "/System/Library/Sounds/\(name).aiff"
+        guard let sound = NSSound(contentsOfFile: path, byReference: true) else { return }
+        sound.play()
     }
 }
 

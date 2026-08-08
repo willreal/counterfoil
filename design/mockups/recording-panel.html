@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Counterfoil — Recording panel</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1d1d1f;
+      --muted: #7b7b80;
+      --quiet: #a1a1a7;
+      --red: #ff3b30;
+      --coral: #ee8f82;
+      --glass: rgba(250, 250, 252, .78);
+      --line: rgba(35, 35, 40, .10);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; color: var(--ink); overflow: hidden;
+      background: #e8e7e5;
+    }
+    .desktop {
+      width: 100vw; height: 100vh; position: relative; padding: 72px 7vw;
+      background:
+        radial-gradient(circle at 78% 28%, rgba(255,255,255,.9), transparent 30%),
+        linear-gradient(140deg, #d8d7d5 0%, #f2f1ef 48%, #d1d0d0 100%);
+    }
+    .desktop:before {
+      content: ""; position: absolute; inset: 0; opacity: .28;
+      background: repeating-linear-gradient(115deg, transparent 0 72px, rgba(255,255,255,.36) 73px 74px);
+      filter: blur(1px);
+    }
+    .window {
+      position: relative; width: min(1050px, 78vw); height: min(680px, 76vh);
+      border-radius: 17px; overflow: hidden; background: rgba(248,248,250,.86);
+      box-shadow: 0 30px 70px rgba(0,0,0,.18), 0 2px 8px rgba(0,0,0,.08);
+      display: grid; grid-template-columns: 278px 1fr;
+    }
+    .traffic { height: 46px; display: flex; align-items: center; gap: 8px; padding: 0 18px; }
+    .traffic i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+    .traffic i:nth-child(1) { background: #ff6058; }
+    .traffic i:nth-child(2) { background: #ffbd2e; }
+    .traffic i:nth-child(3) { background: #28c840; }
+    .sidebar { background: rgba(242,242,245,.68); border-right: 1px solid var(--line); }
+    .side-content { padding: 0 14px 20px; }
+    .search { height: 31px; border-radius: 8px; background: rgba(118,118,128,.12); color: #8c8c91; display: flex; align-items: center; gap: 7px; padding: 0 10px; font-size: 13px; }
+    .side-heading { margin: 22px 7px 8px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .01em; }
+    .row { padding: 10px 9px; border-radius: 9px; margin: 2px 0; }
+    .row.active { background: rgba(255,255,255,.83); box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+    .row b { display: block; font-size: 13px; line-height: 18px; }
+    .row small { display: block; color: var(--muted); font-size: 11px; margin-top: 1px; }
+    .mini-wave { height: 17px; display: flex; align-items: center; gap: 2px; margin-top: 6px; opacity: .65; }
+    .mini-wave i { width: 2px; border-radius: 2px; background: #c4c4c8; display: block; }
+    .mini-wave i:nth-child(1){height:5px}.mini-wave i:nth-child(2){height:10px}.mini-wave i:nth-child(3){height:15px}.mini-wave i:nth-child(4){height:8px}.mini-wave i:nth-child(5){height:12px}.mini-wave i:nth-child(6){height:6px}.mini-wave i:nth-child(7){height:16px}.mini-wave i:nth-child(8){height:9px}.mini-wave i:nth-child(9){height:13px}.mini-wave i:nth-child(10){height:5px}.mini-wave i:nth-child(11){height:11px}.mini-wave i:nth-child(12){height:7px}.mini-wave i:nth-child(13){height:14px}.mini-wave i:nth-child(14){height:6px}.mini-wave i:nth-child(15){height:10px}.mini-wave i:nth-child(16){height:5px}
+    .content { position: relative; background: rgba(255,255,255,.38); }
+    .content .traffic { border-bottom: 1px solid var(--line); }
+    .detail { padding: 60px 75px; }
+    .detail h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: -.025em; }
+    .detail p { margin: 0; color: var(--muted); font-size: 13px; }
+    .scrim { position: absolute; inset: 0; background: rgba(255,255,255,.18); backdrop-filter: blur(3px); }
+    .panel {
+      position: absolute; z-index: 2; top: 50%; left: 50%; transform: translate(-19%, -44%);
+      width: 294px; min-height: 344px; padding: 17px 17px 16px; border: 1px solid rgba(255,255,255,.8);
+      border-radius: 22px; background: linear-gradient(145deg, rgba(255,255,255,.84), rgba(239,239,244,.72));
+      box-shadow: 0 24px 54px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.95);
+      backdrop-filter: blur(34px) saturate(1.35);
+    }
+    .panel-top { display: flex; align-items: center; justify-content: center; position: relative; }
+    .title { color: #68686d; font-size: 12px; font-weight: 600; max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pencil { position: absolute; right: 1px; color: #9b9ba0; font-size: 12px; }
+    .timer { text-align: center; margin-top: 23px; color: var(--red); font: 500 43px/1 -apple-system, BlinkMacSystemFont, "SF Mono", monospace; letter-spacing: .04em; }
+    .timer-label { text-align: center; margin-top: 8px; color: #a0a0a5; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+    .voice-wave { height: 41px; margin: 23px 4px 19px; display: flex; align-items: center; justify-content: center; gap: 3px; }
+    .voice-wave i { width: 3px; border-radius: 4px; background: rgba(255,59,48,.76); display: block; }
+    .voice-wave i:nth-child(1){height:7px}.voice-wave i:nth-child(2){height:13px}.voice-wave i:nth-child(3){height:22px}.voice-wave i:nth-child(4){height:31px}.voice-wave i:nth-child(5){height:17px}.voice-wave i:nth-child(6){height:28px}.voice-wave i:nth-child(7){height:36px}.voice-wave i:nth-child(8){height:23px}.voice-wave i:nth-child(9){height:15px}.voice-wave i:nth-child(10){height:30px}.voice-wave i:nth-child(11){height:20px}.voice-wave i:nth-child(12){height:12px}.voice-wave i:nth-child(13){height:28px}.voice-wave i:nth-child(14){height:35px}.voice-wave i:nth-child(15){height:20px}.voice-wave i:nth-child(16){height:11px}.voice-wave i:nth-child(17){height:26px}.voice-wave i:nth-child(18){height:17px}.voice-wave i:nth-child(19){height:9px}.voice-wave i:nth-child(20){height:15px}
+    .control-row { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 13px 5px; display: flex; justify-content: space-around; align-items: center; }
+    .control { color: #69696e; font-size: 17px; width: 34px; height: 28px; display: grid; place-items: center; }
+    .control.pause { color: #d39419; }
+    .control.flag { color: #78787d; }
+    .stop { height: 48px; border-radius: 14px; display: grid; place-items: center; margin-top: 16px; background: var(--red); color: white; font-size: 19px; box-shadow: 0 6px 13px rgba(255,59,48,.23); }
+    .note-preview { margin: -4px 0 12px; padding: 9px 10px; border-radius: 9px; background: rgba(118,118,128,.10); color: #818187; font-size: 12px; }
+    .caption { margin: 15px 0 0; text-align: center; color: #99999f; font-size: 10px; }
+  </style>
+</head>
+<body>
+  <main class="desktop">
+    <section class="window">
+      <aside class="sidebar">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="side-content">
+          <div class="search">⌕ <span>Search meetings</span></div>
+          <div class="side-heading">TODAY</div>
+          <div class="row active"><b>Q3 product review</b><small>10:42 · 32 min</small><div class="mini-wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+          <div class="row"><b>Design critique</b><small>Yesterday · 48 min</small><div class="mini-wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+        </div>
+      </aside>
+      <section class="content">
+        <div class="traffic"><i></i><i></i><i></i></div>
+        <div class="detail"><h1>Q3 product review</h1><p>Two voices · 32 minutes · Transcript ready</p></div>
+        <div class="scrim"></div>
+        <div class="panel">
+          <div class="panel-top"><div class="title">Q3 product review</div><div class="pencil">✎</div></div>
+          <div class="timer">04:18</div>
+          <div class="timer-label">Recording</div>
+          <div class="voice-wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          <div class="control-row"><div class="control pause">Ⅱ</div><div class="control flag">⚑</div><div class="control">▤</div></div>
+          <div class="stop">■</div>
+          <div class="caption">Stop when you’re done</div>
+        </div>
+      </section>
+    </section>
+  </main>
+</body>
+</html>

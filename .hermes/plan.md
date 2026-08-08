@@ -63,3 +63,16 @@ Ported from spike 003 (validated verbatim). Gotchas: encoder output [1,1024,188]
 
 ## Build
 `build.sh` — swiftc app (Sources/*.swift) + CLI (Transcribe.swift + cli/CLIMain.swift), bundle, icon conversion, ad-hoc sign, install /Applications. Idempotent. Repo: /Users/wchai/counterfoil (private GitHub, Mini).
+
+## Luna design pass — implementation checklist
+
+The design pass keeps the existing audio capture, local Core ML transcription, transcript file format, recovery, deletion, and CLI paths intact. UI work is intentionally concentrated in SwiftUI/AppKit system code.
+
+- [x] Create reviewable HTML mockups in `design/mockups/` for the recording panel, sidebar, transcript, and empty state.
+- [x] Add a floating glass recording panel with editable display title, mic waveform history, pause/flag/note/stop controls, and native system sound feedback.
+- [x] Keep the main toolbar to the record action; move import and search into the sidebar and remove the `⌘R` command.
+- [x] Add sidebar search context, collapsible date groups, cached audio waveforms, and the designed empty state.
+- [x] Render interleaved You/Them transcript ribbons with transport, scrubbed playback, active-line playhead, and flag rail.
+- [x] Reorganize Settings into calm Apple-style sections while retaining vocabulary, auto-delete, model download/status, and privacy copy.
+- [x] Repair iconset 1×/2× generation, add `CFBundleIconName`, and document Finder/Dock cache refresh in `build.sh`.
+- [ ] Verify GUI launch/panel feel on a normal macOS login session and run the exact spoken CLI regression fixture for both models; this runner has no usable GUI launch service, no repo audio fixture, and reports a V3 Core ML execution-plan error.

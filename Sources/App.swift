@@ -6,6 +6,13 @@ struct CounterfoilApp: App {
     @StateObject private var store = TranscriptStore()
     @StateObject private var capture = CaptureManager()
 
+    init() {
+        // Single-window utility: disable window state restoration.
+        // Stale saved frames (from before layout changes) otherwise restore
+        // as invisible ghost windows and the real window never appears.
+        UserDefaults.standard.set(true, forKey: "ApplePersistenceIgnoreState")
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView(store: store, capture: capture)
@@ -26,41 +33,19 @@ struct CounterfoilApp: App {
                 }
                 .keyboardShortcut("f", modifiers: .command)
             }
-            CommandMenu("Recording") {
-                Button(capture.isRecording ? "Stop Recording" : "Start Recording") {
-                    if capture.isRecording {
-                        capture.stop(store: store)
-                    } else {
-                        capture.showTitlePrompt = true
-                    }
-                }
-                .keyboardShortcut("r", modifiers: [.command])
-
-                Divider()
-
-                Button(capture.isPaused ? "Resume Recording" : "Pause Recording") {
-                    if capture.isPaused {
-                        capture.resumeCapture()
-                    } else {
-                        capture.pauseCapture()
-                    }
-                }
-                .keyboardShortcut("p", modifiers: [.command])
-                .disabled(!capture.isRecording)
-
-                Divider()
-
-                Button("Flag Moment") {
-                    capture.flagCurrentMoment()
-                }
-                .keyboardShortcut("f", modifiers: [.option, .command])
-                .disabled(!capture.isRecording || capture.isPaused)
-            }
         }
+
+        Window("Recording", id: RecordingPanelView.windowID) {
+            RecordingPanelView(capture: capture, store: store)
+                .frame(width: 316)
+                .background(RecordingWindowConfigurator())
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 316, height: 366)
+        .windowResizability(.contentSize)
 
         Settings {
             SettingsView()
         }
-        .windowResizability(.contentSize)
     }
 }

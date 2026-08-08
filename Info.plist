@@ -6,6 +6,8 @@
 	<string>en</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 	<key>CFBundleExecutable</key>
 	<string>Counterfoil</string>
 	<key>CFBundleIdentifier</key>
@@ -25,7 +27,7 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>Counterfoil records your screen and system audio to create meeting transcripts.</string>
+	<string>Counterfoil uses Screen Recording permission to capture system audio for meeting transcripts.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Counterfoil records your microphone to capture what you say during meetings.</string>
 </dict>
