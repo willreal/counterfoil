@@ -412,11 +412,14 @@ struct ContentView: View {
         }
         .padding(.horizontal, 9)
         .frame(width: 215, height: 28)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        // Single-layer field: plain fill + one stroke. No nested material
+        // capsule (the toolbar glass strip is the outer surface already).
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
         .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.primary.opacity(0.11), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color.primary.opacity(0.14), lineWidth: 1)
         }
+        .padding(.trailing, 10)
         .help("Search titles and transcripts")
     }
 
@@ -425,11 +428,13 @@ struct ContentView: View {
             .font(.system(size: 12, weight: .medium))
             .padding(.horizontal, 8)
             .frame(height: 27)
-            .contentShape(RoundedRectangle(cornerRadius: 8))   // hit area = whole pill
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: 7))   // hit area = whole pill
+            // Same single-layer treatment as the search field: no nested
+            // material capsule inside the toolbar's glass strip.
+            .background(Color(nsColor: .textBackgroundColor).opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
             .overlay {
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.primary.opacity(0.11), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(Color.primary.opacity(0.14), lineWidth: 1)
             }
     }
 
@@ -441,12 +446,17 @@ struct ContentView: View {
                 .font(.system(size: 8, weight: .semibold))
         }
         .font(.system(size: 12, weight: .medium))
+        // Neutral, not red: red is reserved for Record Meeting (primary
+        // action) and the destructive items inside the menu itself.
+        // (QA: "red serves destructive, primary action, and status roles".)
+        .foregroundStyle(.primary)
         .padding(.horizontal, 8)
         .frame(height: 27)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .contentShape(RoundedRectangle(cornerRadius: 7))   // hit area = whole pill
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
         .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.primary.opacity(0.11), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color.primary.opacity(0.14), lineWidth: 1)
         }
     }
 
@@ -739,8 +749,15 @@ struct ContentView: View {
 
     private func transcriptView(session: Session) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Quiet meta line (date · duration) — the title itself lives in
-            // the sidebar; repeating it here was removed by design.
+            // Meeting identity: title is the anchor, meta line below it.
+            // (User + ChatGPT QA: main pane must show which meeting is open.)
+            Text(session.title)
+                .font(.system(.title2, design: .rounded).weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .padding(.horizontal, 31)
+                .padding(.top, 14)
+
             HStack(spacing: 9) {
                 Text(session.startTime, style: .date)
                 Text("·")
@@ -751,7 +768,7 @@ struct ContentView: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .padding(.horizontal, 31)
-            .padding(.top, 14)
+            .padding(.top, 3)
             .padding(.bottom, 4)
 
             if player.hasAudio {
@@ -825,21 +842,21 @@ struct ContentView: View {
                 get: { Double(player.rate) },
                 set: { player.setRate(Float($0)) }
             )) {
-                Text("0.5").tag(0.5)
-                Text("1").tag(1.0)
-                Text("1.5").tag(1.5)
-                Text("2").tag(2.0)
+                Text("0.5×").tag(0.5)
+                Text("1×").tag(1.0)
+                Text("1.5×").tag(1.5)
+                Text("2×").tag(2.0)
             }
             .pickerStyle(.menu)
             .labelsHidden()
-            .frame(minWidth: 68)
+            .frame(minWidth: 76)
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 8)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.7), in: RoundedRectangle(cornerRadius: 11))
         .overlay {
             RoundedRectangle(cornerRadius: 11)
-                .stroke(Color.primary.opacity(0.08))
+                .stroke(Color.primary.opacity(0.14))
         }
     }
 
@@ -887,6 +904,16 @@ struct ContentView: View {
     ) -> some View {
         if line.isEmpty {
             Spacer().frame(height: 7).id(line.id)
+        } else if line.text == "No transcript available" {
+            // Old-format placeholder: render as a quiet centered message,
+            // not as an annotation line with a coral bar (QA: coral line
+            // read as a stray caret; message looked disabled).
+            Text("No transcript available")
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 24)
+                .id(line.id)
         } else if line.isAnnotation {
             annotationLine(line, session: session)
             .id(line.id)
@@ -1323,10 +1350,14 @@ struct FlagRail: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .top) {
-                Rectangle()
-                    .fill(Color.primary.opacity(0.09))
-                    .frame(width: 1)
-                    .frame(maxHeight: .infinity)
+                // Only draw the rail when there are flags to show; an empty
+                // rail reads as a stray artifact (QA: "unclear vertical line").
+                if !flags.isEmpty {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.09))
+                        .frame(width: 1)
+                        .frame(maxHeight: .infinity)
+                }
 
                 ForEach(flags) { flag in
                     if let time = flag.timestamp {
