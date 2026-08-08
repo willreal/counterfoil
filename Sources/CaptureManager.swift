@@ -4,16 +4,18 @@ import AVFoundation
 import SwiftUI
 import Combine
 
-class CaptureManager: NSObject, SCRecordingOutputDelegate, ObservableObject {
+class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
     @Published var isRecording = false
     @Published var status = "Ready"
     @Published var recordingDuration: TimeInterval = 0
-    @Published var micEnabled = true
     @Published var recordingStartTime: Date?
+    @Published var showTitlePrompt = false
 
     private var stream: SCStream?
-    private var recordingOutput: SCRecordingOutput?
+    private var assetWriter: AVAssetWriter?
+    private var assetWriterInput: AVAssetWriterInput?
     private var sessionStem: String = ""
+    private var sessionTitle: String = ""
     private var sessionDir: URL?
     private var systemFileURL: URL?
     private var micFileURL: URL?
@@ -44,21 +46,37 @@ class CaptureManager: NSObject, SCRecordingOutputDelegate, ObservableObject {
         return d
     }
 
-    func start() {
+    static func sanitizeTitle(_ title: String) -> String {
+        var s = title
+        for ch in ["/", ":", "\\", "*", "?", "\"", "<", ">", "|"] {
+            s = s.replacingOccurrences(of: ch, with: "")
+        }
+        if s.count > 60 { s = String(s.prefix(60)) }
+        return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    static func formatDateTime(_ date: Date) -> String {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd HHmm"
+        return df.string(from: date)
+    }
+
+    func start(title: String) {
         let now = Date()
         recordingStartTime = now
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd_HHmmss"
-        let stem = "meeting_" + df.string(from: now)
+        let sanitized = Self.sanitizeTitle(title)
+        let dateStr = Self.formatDateTime(now)
+        let stem = "\(sanitized) \(dateStr)"
         sessionStem = stem
+        sessionTitle = title
         sessionDir = Self.dayDir(date: now)
-        systemFileURL = sessionDir!.appendingPathComponent("\(stem).mp4")
+        systemFileURL = sessionDir!.appendingPathComponent("\(stem).m4a")
         micFileURL = sessionDir!.appendingPathComponent("\(stem).mic.m4a")
 
         Task {
             do {
                 try await startSystemCapture(to: systemFileURL!)
-                if micEnabled && Self.hasMic {
+                if Self.hasMic {
                     try startMicCapture(to: micFileURL!)
                 }
                 await MainActor.run {
@@ -81,8 +99,9 @@ class CaptureManager: NSObject, SCRecordingOutputDelegate, ObservableObject {
         let sysURL = systemFileURL
         let micURL = micFileURL
         let startTime = recordingStartTime ?? Date()
-        let isMicPresent = micURL != nil && micEnabled && Self.hasMic
+        let isMicPresent = micURL != nil && Self.hasMic
         let recDuration = recordingDuration
+        let title = sessionTitle
 
         durationTimer?.cancel()
         durationTimer = nil
@@ -93,6 +112,8 @@ class CaptureManager: NSObject, SCRecordingOutputDelegate, ObservableObject {
             } catch {
                 print("stop capture error: \(error)")
             }
+
+            await finishWriter()
 
             micFile = nil
             audioEngine?.stop()
@@ -158,6 +179,7 @@ class CaptureManager: NSObject, SCRecordingOutputDelegate, ObservableObject {
             await MainActor.run {
                 store.addSession(
                     stem: stem,
+                    title: title,
                     dayDir: dir,
                     startTime: startTime,
                     systemText: finalSysText,
@@ -168,6 +190,7 @@ class CaptureManager: NSObject, SCRecordingOutputDelegate, ObservableObject {
                 self.status = "Ready"
                 self.recordingDuration = 0
                 self.sessionStem = ""
+                self.sessionTitle = ""
                 self.systemFileURL = nil
                 self.micFileURL = nil
                 self.finished = false
@@ -177,7 +200,7 @@ class CaptureManager: NSObject, SCRecordingOutputDelegate, ObservableObject {
         }
     }
 
-    // MARK: System capture (ScreenCaptureKit)
+    // MARK: System capture (ScreenCaptureKit, audio-only)
 
     private func startSystemCapture(to url: URL) async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -199,19 +222,22 @@ class CaptureManager: NSObject, SCRecordingOutputDelegate, ObservableObject {
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let s = SCStream(filter: filter, configuration: config, delegate: nil)
 
-        let recConfig = SCRecordingOutputConfiguration()
-        recConfig.outputURL = url
-        recConfig.videoCodecType = .h264
-        recConfig.outputFileType = .mp4
+        try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: .main)
 
         try FileManager.default.createDirectory(at: sessionDir!, withIntermediateDirectories: true)
         try? FileManager.default.removeItem(at: url)
 
-        let recOutput = SCRecordingOutput(configuration: recConfig, delegate: self)
-        try s.addRecordingOutput(recOutput)
+        let writer = try AVAssetWriter(url: url, fileType: .m4a)
+        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 44100,
+            AVNumberOfChannelsKey: 2,
+        ])
+        writer.add(input)
+        assetWriter = writer
+        assetWriterInput = input
 
         stream = s
-        recordingOutput = recOutput
         started = false
         finished = false
         failure = nil
@@ -245,9 +271,7 @@ class CaptureManager: NSObject, SCRecordingOutputDelegate, ObservableObject {
             AVNumberOfChannelsKey: 1,
         ]
 
-        if let micFileURL = url as URL? {
-            try? FileManager.default.removeItem(at: micFileURL)
-        }
+        try? FileManager.default.removeItem(at: url)
 
         let file = try AVAudioFile(forWriting: url, settings: settings)
         micFile = file
@@ -274,19 +298,40 @@ class CaptureManager: NSObject, SCRecordingOutputDelegate, ObservableObject {
             }
     }
 
-    // MARK: SCRecordingOutputDelegate
-
-    func recordingOutputDidStartRecording(_ recordingOutput: SCRecordingOutput) {
-        started = true
+    private func finishWriter() async {
+        guard let writer = assetWriter else { return }
+        assetWriterInput?.markAsFinished()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            writer.finishWriting {
+                continuation.resume()
+            }
+        }
+        if writer.status == .failed {
+            failure = writer.error?.localizedDescription ?? "writer failed"
+        }
+        finished = true
+        assetWriter = nil
+        assetWriterInput = nil
     }
 
-    func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
-        finished = true
-    }
+    // MARK: SCStreamOutput
 
-    func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: Error) {
-        failure = error.localizedDescription
-        started = true
-        finished = true
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .audio else { return }
+        guard let writer = assetWriter, let input = assetWriterInput else { return }
+
+        if writer.status == .unknown {
+            writer.startWriting()
+            writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            started = true
+        }
+
+        if writer.status == .writing, input.isReadyForMoreMediaData {
+            if !input.append(sampleBuffer) {
+                failure = writer.error?.localizedDescription ?? "append failed"
+                started = true
+                finished = true
+            }
+        }
     }
 }

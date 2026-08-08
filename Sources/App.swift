@@ -25,16 +25,10 @@ struct CounterfoilApp: App {
                     if capture.isRecording {
                         capture.stop(store: store)
                     } else {
-                        capture.start()
+                        capture.showTitlePrompt = true
                     }
                 }
                 .keyboardShortcut("r", modifiers: [.command])
-                Divider()
-                Button("Toggle Microphone") {
-                    capture.micEnabled.toggle()
-                }
-                .keyboardShortcut("m", modifiers: [.command])
-                .disabled(!CaptureManager.hasMic)
             }
         }
     }
