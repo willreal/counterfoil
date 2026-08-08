@@ -589,7 +589,7 @@ class TranscriptStore: ObservableObject {
         lines.sort()
 
         if lines.isEmpty {
-            return "_No transcript available_"
+            return "No transcript available"
         }
 
         return lines.map { line in

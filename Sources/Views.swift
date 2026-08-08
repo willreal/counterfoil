@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import CoreGraphics
 import UniformTypeIdentifiers
 
 private let counterfoilRed = Color(red: 1.0, green: 0.231, blue: 0.188)
@@ -171,6 +172,7 @@ struct ContentView: View {
 
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
+    @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding = false
 
     @StateObject private var player = TranscriptPlayer()
     @StateObject private var waveformStore = WaveformStore()
@@ -185,27 +187,15 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             sidebar
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    sidebarFooter
+                }
                 .frame(minWidth: 250)
         } detail: {
             detailPane
         }
         .navigationSplitViewStyle(.balanced)
         .tint(counterfoilRed)
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    titleText = ""
-                    capture.showTitlePrompt = true
-                } label: {
-                    Image(systemName: "record.circle.fill")
-                        .font(.system(size: 21, weight: .medium))
-                        .foregroundStyle(counterfoilRed)
-                }
-                .buttonStyle(.plain)
-                .help("Start a recording")
-                .disabled(capture.isRecording)
-            }
-        }
         .sheet(isPresented: $capture.showTitlePrompt) {
             titleSheet
         }
@@ -224,6 +214,10 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CounterfoilFind"))) { _ in
             searchFocused = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CounterfoilShowOnboarding"))) { _ in
+            hasSeenOnboarding = false
+            openWindow(id: OnboardingView.windowID)
+        }
         .onChange(of: capture.isRecording) { _, isRecording in
             if isRecording {
                 openWindow(id: RecordingPanelView.windowID)
@@ -237,6 +231,11 @@ struct ContentView: View {
         .onAppear {
             if capture.isRecording {
                 openWindow(id: RecordingPanelView.windowID)
+            }
+            if !hasSeenOnboarding {
+                DispatchQueue.main.async {
+                    openWindow(id: OnboardingView.windowID)
+                }
             }
         }
     }
@@ -288,8 +287,6 @@ struct ContentView: View {
                 }
             }
             .listStyle(.sidebar)
-
-            sidebarFooter
         }
         .background(Color(nsColor: .controlBackgroundColor))
     }
@@ -322,26 +319,52 @@ struct ContentView: View {
     }
 
     private var sidebarFooter: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Button {
                 showImportPicker = true
             } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(width: 28, height: 28)
+                Label("Import", systemImage: "plus")
+                    .font(.system(.callout, design: .rounded).weight(.semibold))
+                    .frame(minWidth: 92, minHeight: 36)
             }
             .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay {
+                Capsule().stroke(Color.primary.opacity(0.11), lineWidth: 1)
+            }
+            .contentShape(Capsule())
             .help("Import audio")
             .disabled(capture.isRecording)
 
-            if store.isImporting {
-                ProgressView()
-                    .controlSize(.small)
-            }
             Spacer()
+
+            Button {
+                titleText = ""
+                capture.showTitlePrompt = true
+            } label: {
+                Label("Record Meeting", systemImage: "record.circle.fill")
+                    .font(.system(.callout, design: .rounded).weight(.semibold))
+                    .frame(minWidth: 151, minHeight: 36)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(counterfoilRed)
+            .background {
+                Capsule()
+                    .fill(.ultraThinMaterial)
+                    .overlay(Capsule().fill(counterfoilRed.opacity(0.14)))
+            }
+            .overlay {
+                Capsule().stroke(counterfoilRed.opacity(0.42), lineWidth: 1)
+            }
+            .contentShape(Capsule())
+            .help("Start a recording")
+            .disabled(capture.isRecording)
         }
-        .padding(.horizontal, 14)
-        .frame(height: 47)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(.bar)
         .overlay(alignment: .top) { Divider() }
     }
 
@@ -608,9 +631,6 @@ struct ContentView: View {
                         } else {
                             Text("Transcript")
                         }
-                        if session.hasMicFile {
-                            Text("· You + Them")
-                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -731,14 +751,14 @@ struct ContentView: View {
                 get: { Double(player.rate) },
                 set: { player.setRate(Float($0)) }
             )) {
-                Text("0.5×").tag(0.5)
-                Text("1×").tag(1.0)
-                Text("1.5×").tag(1.5)
-                Text("2×").tag(2.0)
+                Text("0.5").tag(0.5)
+                Text("1").tag(1.0)
+                Text("1.5").tag(1.5)
+                Text("2").tag(2.0)
             }
             .pickerStyle(.menu)
             .labelsHidden()
-            .frame(width: 53)
+            .frame(minWidth: 68)
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 8)
@@ -896,8 +916,12 @@ struct ContentView: View {
 
     private func parseTranscriptLines(_ markdown: String) -> [TranscriptLineItem] {
         var items: [TranscriptLineItem] = []
+        let trimmedMarkdown = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedMarkdown = trimmedMarkdown.trimmingCharacters(in: CharacterSet(charactersIn: "_")) == "No transcript available"
+            ? "No transcript available"
+            : markdown
 
-        for raw in markdown.components(separatedBy: "\n") {
+        for raw in normalizedMarkdown.components(separatedBy: "\n") {
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty {
                 items.append(TranscriptLineItem(text: "", timestamp: nil, raw: raw, speaker: nil, isAnnotation: false, isFlag: false, isHeader: false, isMeta: false, isEmpty: true))
@@ -962,7 +986,7 @@ struct ContentView: View {
                     .foregroundStyle(.orange)
                 Text("Models needed for transcription")
                     .font(.headline)
-                Text("Download a model in Settings → Transcription.")
+                Text("Download a model in Settings → Models.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button("Open Settings") { showSettingsWindow() }
@@ -1139,6 +1163,7 @@ struct RecordingPanelView: View {
 
     @ObservedObject var capture: CaptureManager
     @ObservedObject var store: TranscriptStore
+    @Environment(\.dismissWindow) private var dismissWindow
 
     @State private var draftTitle = ""
     @State private var editingTitle = false
@@ -1149,68 +1174,41 @@ struct RecordingPanelView: View {
     @FocusState private var noteFocused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            titleHeader
-
-            Text(formatRecordingClock(capture.recordingDuration))
-                .font(.system(size: 42, weight: .medium, design: .monospaced))
-                .tracking(1.1)
-                .foregroundStyle(capture.isPaused ? Color.yellow.opacity(0.92) : counterfoilRed)
-                .padding(.top, 22)
-
-            Text(capture.isPaused ? "Paused" : "Recording")
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .tracking(1.1)
-                .textCase(.uppercase)
-                .foregroundStyle(.secondary)
-                .padding(.top, 7)
-
-            MicWaveformView(
-                samples: capture.micSamples,
-                color: CaptureManager.hasMic ? counterfoilRed.opacity(0.72) : Color.secondary.opacity(0.27)
-            )
-            .frame(height: 38)
-            .padding(.horizontal, 8)
-            .padding(.top, 18)
-            .padding(.bottom, 16)
-
-            controlRow
+        HStack(alignment: .top, spacing: 0) {
+            mainPanel
 
             if noteExpanded {
-                noteEditor
-                    .padding(.top, 11)
-            }
+                Rectangle()
+                    .fill(Color.white.opacity(0.16))
+                    .frame(width: 1)
+                    .padding(.vertical, 18)
 
-            Button {
-                capture.stop(store: store)
-            } label: {
-                Image(systemName: "stop.fill")
-                    .font(.system(size: 17, weight: .bold))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 49)
+                noteTray
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.white)
-            .background(counterfoilRed, in: RoundedRectangle(cornerRadius: 14))
-            .shadow(color: counterfoilRed.opacity(0.25), radius: 10, y: 4)
-            .padding(.top, 16)
-
-            Text("Stop when you’re done")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-                .padding(.top, 11)
         }
-        .padding(.horizontal, 17)
-        .padding(.top, 16)
-        .padding(.bottom, 15)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color.black.opacity(0.72))
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color(red: 0.12, green: 0.08, blue: 0.09).opacity(0.3))
+            }
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(Color.white.opacity(0.72), lineWidth: 1)
+                .stroke(Color.white.opacity(0.22), lineWidth: 1)
         }
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .shadow(color: .black.opacity(0.22), radius: 26, y: 12)
         .onAppear {
-            draftTitle = capture.activeTitle
+            if capture.isRecording {
+                draftTitle = capture.activeTitle
+            } else {
+                dismissPanelWindow()
+            }
         }
         .onChange(of: capture.activeTitle) { _, title in
             if !editingTitle { draftTitle = title }
@@ -1221,8 +1219,57 @@ struct RecordingPanelView: View {
         .onChange(of: noteExpanded) { _, expanded in
             if expanded {
                 DispatchQueue.main.async { noteFocused = true }
+            } else {
+                noteFocused = false
+            }
+            resizeWindow(expanded: expanded)
+        }
+        .onChange(of: capture.isRecording) { _, isRecording in
+            if !isRecording {
+                dismissPanelWindow()
             }
         }
+    }
+
+    private var mainPanel: some View {
+        VStack(spacing: 0) {
+            titleHeader
+
+            Text(formatRecordingClock(capture.recordingDuration))
+                .font(.system(size: 42, weight: .medium, design: .monospaced))
+                .tracking(1.1)
+                .foregroundStyle(capture.isPaused ? Color.yellow.opacity(0.98) : counterfoilRed)
+                .padding(.top, 22)
+
+            MicWaveformView(
+                samples: capture.micSamples,
+                color: CaptureManager.hasMic ? counterfoilRed.opacity(0.92) : Color.white.opacity(0.42)
+            )
+            .frame(height: 38)
+            .padding(.horizontal, 8)
+            .padding(.top, 18)
+            .padding(.bottom, 16)
+
+            controlRow
+
+            Button {
+                capture.stop(store: store)
+            } label: {
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 17, weight: .bold))
+                    .frame(maxWidth: .infinity, minHeight: 50)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .background(counterfoilRed, in: RoundedRectangle(cornerRadius: 14))
+            .shadow(color: counterfoilRed.opacity(0.32), radius: 10, y: 4)
+            .contentShape(RoundedRectangle(cornerRadius: 14))
+            .padding(.top, 16)
+        }
+        .padding(.horizontal, 17)
+        .padding(.top, 16)
+        .padding(.bottom, 16)
+        .frame(width: 316)
     }
 
     private var titleHeader: some View {
@@ -1232,17 +1279,20 @@ struct RecordingPanelView: View {
                     TextField("Meeting title", text: $draftTitle)
                         .textFieldStyle(.plain)
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white)
                         .multilineTextAlignment(.center)
                         .focused($titleFocused)
                         .onSubmit { commitTitle() }
                     Button {
                         commitTitle()
                     } label: {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 11, weight: .bold))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 11, weight: .bold))
+                                .frame(width: 32, height: 32)
+                        }
+                        .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .contentShape(Rectangle())
                 }
             } else {
                 Button {
@@ -1259,10 +1309,11 @@ struct RecordingPanelView: View {
                             .foregroundStyle(.tertiary)
                     }
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: 232)
+                    .foregroundStyle(.white.opacity(0.94))
+                    .frame(maxWidth: 232, minHeight: 32)
                 }
                 .buttonStyle(.plain)
+                .contentShape(Rectangle())
                 .help("Edit meeting title")
             }
         }
@@ -1285,7 +1336,7 @@ struct RecordingPanelView: View {
 
             panelControl(
                 systemName: "flag",
-                tint: flagPulse ? counterfoilRed : .secondary,
+                tint: flagPulse ? counterfoilRed : Color.white.opacity(0.88),
                 help: "Flag moment"
             ) {
                 guard !capture.isPaused else { return }
@@ -1298,16 +1349,16 @@ struct RecordingPanelView: View {
 
             panelControl(
                 systemName: noteExpanded ? "note.text" : "note.text.badge.plus",
-                tint: .secondary,
+                tint: Color.white.opacity(0.88),
                 help: "Add note"
             ) {
                 noteExpanded.toggle()
                 if !noteExpanded { noteDraft = "" }
             }
         }
-        .padding(.vertical, 10)
-        .overlay(alignment: .top) { Divider().opacity(0.55) }
-        .overlay(alignment: .bottom) { Divider().opacity(0.55) }
+        .padding(.vertical, 7)
+        .overlay(alignment: .top) { Divider().overlay(Color.white.opacity(0.18)) }
+        .overlay(alignment: .bottom) { Divider().overlay(Color.white.opacity(0.18)) }
     }
 
     private func panelControl(systemName: String, tint: Color, help: String, action: @escaping () -> Void) -> some View {
@@ -1315,36 +1366,80 @@ struct RecordingPanelView: View {
             Image(systemName: systemName)
                 .font(.system(size: 15, weight: .medium))
                 .frame(maxWidth: .infinity)
-                .frame(height: 28)
+                .frame(minHeight: 36)
         }
         .buttonStyle(.plain)
         .foregroundStyle(tint)
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .contentShape(Rectangle())
         .help(help)
     }
 
-    private var noteEditor: some View {
-        HStack(spacing: 7) {
-            TextField("Add a note…", text: $noteDraft)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .focused($noteFocused)
-                .onSubmit { commitNote() }
+    private var noteTray: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack {
+                Text("Notes")
+                    .font(.system(.headline, design: .rounded).weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.95))
+                Spacer()
+                Button {
+                    noteExpanded = false
+                    noteDraft = ""
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.75))
+                .contentShape(Rectangle())
+                .help("Close notes")
+            }
+
+            ZStack(alignment: .topLeading) {
+                if noteDraft.isEmpty {
+                    Text("Write a note…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 9)
+                        .allowsHitTesting(false)
+                }
+                TextEditor(text: $noteDraft)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .scrollContentBackground(.hidden)
+                    .focused($noteFocused)
+            }
+            .frame(height: 142)
+            .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(Color.white.opacity(0.14), lineWidth: 1)
+            }
+
+            Text("⌘↩ saves a timestamped note")
+                .font(.system(size: 10))
+                .foregroundStyle(.white.opacity(0.5))
 
             Button {
                 commitNote()
             } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 17))
+                Label("Save Note", systemImage: "arrow.up.circle.fill")
+                    .font(.system(.callout, design: .rounded).weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 36)
             }
             .buttonStyle(.plain)
-            .foregroundStyle(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary.opacity(0.42) : counterfoilRed)
+            .foregroundStyle(.white)
+            .background(counterfoilRed, in: RoundedRectangle(cornerRadius: 9))
+            .contentShape(RoundedRectangle(cornerRadius: 9))
             .disabled(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .opacity(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.48 : 1)
             .keyboardShortcut(.return, modifiers: .command)
             .help("Commit note (⌘↩)")
         }
-        .padding(.horizontal, 9)
-        .frame(height: 31)
-        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        .padding(16)
+        .frame(width: 260, alignment: .top)
     }
 
     private func commitTitle() {
@@ -1364,6 +1459,25 @@ struct RecordingPanelView: View {
         noteDraft = ""
         noteExpanded = false
         noteFocused = false
+    }
+
+    private func dismissPanelWindow() {
+        dismissWindow(id: Self.windowID)
+        DispatchQueue.main.async {
+            NSApp.windows.first { $0.identifier?.rawValue == Self.windowID }?.close()
+        }
+    }
+
+    private func resizeWindow(expanded: Bool) {
+        let targetWidth: CGFloat = expanded ? 577 : 316
+        DispatchQueue.main.async {
+            guard let window = NSApp.windows.first(where: { $0.identifier?.rawValue == Self.windowID }) else { return }
+            var frame = window.frame
+            let rightEdge = frame.maxX
+            frame.size.width = targetWidth
+            frame.origin.x = rightEdge - targetWidth
+            window.setFrame(frame, display: true, animate: true)
+        }
     }
 }
 
@@ -1398,16 +1512,18 @@ struct RecordingWindowConfigurator: NSViewRepresentable {
 struct SettingsView: View {
     private enum Section: String, CaseIterable, Identifiable {
         case general = "General"
-        case transcription = "Transcription"
         case vocabulary = "Vocabulary"
+        case models = "Models"
+        case permissions = "Permissions"
         case about = "About"
 
         var id: String { rawValue }
         var symbol: String {
             switch self {
             case .general: return "gearshape"
-            case .transcription: return "waveform"
             case .vocabulary: return "textformat.abc"
+            case .models: return "waveform"
+            case .permissions: return "checkmark.shield"
             case .about: return "info.circle"
             }
         }
@@ -1416,30 +1532,207 @@ struct SettingsView: View {
     @State private var selection: Section = .general
 
     var body: some View {
-        NavigationSplitView {
-            List(Section.allCases, selection: $selection) { section in
-                Label(section.rawValue, systemImage: section.symbol)
-                    .tag(section)
+        VStack(spacing: 0) {
+            HStack(spacing: 4) {
+                ForEach(Section.allCases) { section in
+                    Button {
+                        selection = section
+                    } label: {
+                        VStack(spacing: 5) {
+                            Image(systemName: section.symbol)
+                                .font(.system(size: 13, weight: .medium))
+                            Text(section.rawValue)
+                                .font(.system(size: 11, weight: selection == section ? .semibold : .regular))
+                        }
+                        .foregroundStyle(selection == section ? .primary : .secondary)
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .overlay(alignment: .bottom) {
+                            Capsule()
+                                .fill(selection == section ? counterfoilRed : .clear)
+                                .frame(height: 2)
+                                .padding(.horizontal, 18)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .contentShape(Rectangle())
+                    .help(section.rawValue)
+                }
             }
-            .listStyle(.sidebar)
-            .navigationTitle("Settings")
-            .navigationSplitViewColumnWidth(175)
-        } detail: {
+
+            Divider()
+
             Group {
                 switch selection {
                 case .general:
                     GeneralSettingsView()
-                case .transcription:
-                    ModelsSettingsView()
                 case .vocabulary:
                     VocabSettingsView()
+                case .models:
+                    ModelsSettingsView()
+                case .permissions:
+                    PermissionsSettingsView()
                 case .about:
                     AboutSettingsView()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 700, minHeight: 485)
+        .frame(minWidth: 680, minHeight: 485)
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CounterfoilOpenModelsSettings"))) { _ in
+            selection = .models
+        }
+        .onAppear {
+            if UserDefaults.standard.bool(forKey: "openModelsSettings") {
+                selection = .models
+                UserDefaults.standard.set(false, forKey: "openModelsSettings")
+            }
+        }
+    }
+}
+
+enum CounterfoilPermissionState: String {
+    case granted = "Granted"
+    case notGranted = "Not Granted"
+    case unknown = "Unknown"
+
+    var color: Color {
+        switch self {
+        case .granted: return .green
+        case .notGranted: return .orange
+        case .unknown: return .secondary
+        }
+    }
+}
+
+enum CounterfoilPermissions {
+    static let microphoneURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+    static let screenRecordingURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+
+    static func microphoneState() -> CounterfoilPermissionState {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return .granted
+        case .denied, .restricted:
+            return .notGranted
+        case .notDetermined:
+            return .unknown
+        @unknown default:
+            return .unknown
+        }
+    }
+
+    static func screenRecordingState() -> CounterfoilPermissionState {
+        if #available(macOS 10.15, *) {
+            return CGPreflightScreenCaptureAccess() ? .granted : .notGranted
+        }
+        return .unknown
+    }
+
+    static func open(_ urlString: String) {
+        guard let url = URL(string: urlString) else { return }
+        NSWorkspace.shared.open(url)
+    }
+}
+
+struct PermissionRowView: View {
+    let name: String
+    let systemImage: String
+    let state: CounterfoilPermissionState
+    let explanation: String
+    let settingsURL: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Label(name, systemImage: systemImage)
+                    .font(.body.weight(.semibold))
+                Spacer(minLength: 6)
+                Text(state.rawValue)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(state.color)
+            }
+
+            HStack(alignment: .top, spacing: 12) {
+                Text(explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Spacer(minLength: 0)
+
+                Button("Open System Settings") {
+                    CounterfoilPermissions.open(settingsURL)
+                }
+                .buttonStyle(.bordered)
+                .frame(minHeight: 30)
+                .contentShape(Rectangle())
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 11))
+    }
+}
+
+struct PermissionsSettingsView: View {
+    @State private var microphoneState = CounterfoilPermissionState.unknown
+    @State private var screenRecordingState = CounterfoilPermissionState.unknown
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 17) {
+                settingsHeading
+
+                PermissionRowView(
+                    name: "Microphone",
+                    systemImage: "mic.fill",
+                    state: microphoneState,
+                    explanation: "Counterfoil records your voice locally so transcripts can distinguish what you say.",
+                    settingsURL: CounterfoilPermissions.microphoneURL
+                )
+
+                PermissionRowView(
+                    name: "Screen Recording",
+                    systemImage: "rectangle.inset.filled",
+                    state: screenRecordingState,
+                    explanation: "macOS requires screen recording permission to capture system audio, even though Counterfoil records audio only.",
+                    settingsURL: CounterfoilPermissions.screenRecordingURL
+                )
+
+                HStack {
+                    Text("Permission changes may require restarting Counterfoil.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Check status") {
+                        refresh()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(counterfoilRed)
+                    .frame(minHeight: 30)
+                    .contentShape(Rectangle())
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onAppear { refresh() }
+    }
+
+    private var settingsHeading: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Permissions")
+                .font(.system(.title2, design: .rounded).weight(.semibold))
+            Text("Counterfoil asks only for the access needed to record both sides of a meeting.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func refresh() {
+        microphoneState = CounterfoilPermissions.microphoneState()
+        screenRecordingState = CounterfoilPermissions.screenRecordingState()
     }
 }
 
@@ -1511,7 +1804,7 @@ struct ModelsSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                settingsHeading("Transcription", subtitle: "Choose the local model used for new meetings.")
+                settingsHeading("Models", subtitle: "Choose the local model used for new meetings.")
 
                 GroupBox {
                     VStack(alignment: .leading, spacing: 8) {
@@ -1756,9 +2049,15 @@ struct VocabSettingsView: View {
             .padding(.bottom, 16)
 
             HStack {
-                Text("From").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Text("To").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Spacer().frame(width: 28)
+                Text("From")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("To")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Color.clear.frame(width: 28, height: 1)
             }
             .padding(.horizontal, 28)
             .padding(.bottom, 5)
@@ -1770,6 +2069,7 @@ struct VocabSettingsView: View {
                     }
                 }
                 .padding(.horizontal, 28)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             HStack {
@@ -1796,6 +2096,7 @@ struct VocabSettingsView: View {
                 }
             ))
             .textFieldStyle(.roundedBorder)
+            .frame(maxWidth: .infinity)
 
             TextField("e.g. Tachyboard", text: Binding(
                 get: { pair.to },
@@ -1806,6 +2107,7 @@ struct VocabSettingsView: View {
                 }
             ))
             .textFieldStyle(.roundedBorder)
+            .frame(maxWidth: .infinity)
 
             Button {
                 if let index = settings.vocabularyPairs.firstIndex(where: { $0.id == pair.id }) {
@@ -1814,8 +2116,10 @@ struct VocabSettingsView: View {
             } label: {
                 Image(systemName: "minus.circle.fill")
                     .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 32)
             }
             .buttonStyle(.plain)
+            .contentShape(Rectangle())
         }
     }
 }
@@ -1838,6 +2142,13 @@ struct AboutSettingsView: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .frame(width: 300)
+            Button("Show onboarding again") {
+                UserDefaults.standard.set(false, forKey: "hasSeenOnboarding")
+                NotificationCenter.default.post(name: NSNotification.Name("CounterfoilShowOnboarding"), object: nil)
+            }
+            .buttonStyle(.bordered)
+            .frame(minHeight: 30)
+            .contentShape(Rectangle())
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1850,5 +2161,233 @@ struct AboutSettingsView: View {
 
     private func bundleBuild() -> String {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+    }
+}
+
+struct OnboardingView: View {
+    static let windowID = "onboarding"
+
+    @Environment(\.dismissWindow) private var dismissWindow
+    @ObservedObject private var settings = SettingsStore.shared
+    @AppStorage("hasSeenOnboarding") private var hasSeenOnboarding = false
+    @State private var page = 0
+    @State private var microphoneState = CounterfoilPermissionState.unknown
+    @State private var screenRecordingState = CounterfoilPermissionState.unknown
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Counterfoil")
+                    .font(.system(.headline, design: .rounded).weight(.semibold))
+                Spacer()
+                Button("Skip") { skip() }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 52, minHeight: 32)
+                    .contentShape(Rectangle())
+            }
+            .padding(.horizontal, 22)
+            .padding(.top, 15)
+            .padding(.bottom, 9)
+
+            Divider()
+
+            Group {
+                switch page {
+                case 0:
+                    welcomePage
+                case 1:
+                    permissionsPage
+                default:
+                    readyPage
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            HStack {
+                HStack(spacing: 6) {
+                    ForEach(0..<3, id: \.self) { index in
+                        Circle()
+                            .fill(index == page ? counterfoilRed : Color.secondary.opacity(0.28))
+                            .frame(width: index == page ? 7 : 5, height: index == page ? 7 : 5)
+                    }
+                }
+                .frame(width: 58, alignment: .leading)
+
+                Spacer()
+
+                if page > 0 {
+                    Button("Back") { page -= 1 }
+                        .buttonStyle(.bordered)
+                        .frame(minWidth: 68, minHeight: 30)
+                        .contentShape(Rectangle())
+                }
+
+                Button(page == 2 ? "Start using Counterfoil" : "Continue") {
+                    if page == 2 {
+                        finish()
+                    } else {
+                        withAnimation(.easeInOut(duration: 0.18)) { page += 1 }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(counterfoilRed)
+                .frame(minWidth: page == 2 ? 166 : 88, minHeight: 30)
+                .contentShape(Rectangle())
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 15)
+        }
+        .frame(width: 480, height: 360)
+        .onAppear { refreshPermissions() }
+        .onExitCommand { skip() }
+        .onDisappear {
+            if !hasSeenOnboarding {
+                hasSeenOnboarding = true
+            }
+        }
+    }
+
+    private var welcomePage: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "waveform.and.mic")
+                .font(.system(size: 42, weight: .medium))
+                .foregroundStyle(counterfoilRed)
+                .padding(.top, 8)
+
+            Text("Meetings, kept local.")
+                .font(.system(.title2, design: .rounded).weight(.semibold))
+
+            Text("Counterfoil records both sides of a meeting and transcribes them on this Mac. Your audio and transcripts stay private: no accounts, no cloud, no tracking.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 370)
+
+            Label("100% local", systemImage: "lock.shield.fill")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 32)
+    }
+
+    private var permissionsPage: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 11) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("A couple of permissions")
+                        .font(.system(.title3, design: .rounded).weight(.semibold))
+                    Text("Counterfoil needs these to hear you and the meeting audio. macOS will keep the final decision in your hands.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                PermissionRowView(
+                    name: "Microphone",
+                    systemImage: "mic.fill",
+                    state: microphoneState,
+                    explanation: "Captures your voice locally for the You channel.",
+                    settingsURL: CounterfoilPermissions.microphoneURL
+                )
+
+                PermissionRowView(
+                    name: "Screen Recording",
+                    systemImage: "rectangle.inset.filled",
+                    state: screenRecordingState,
+                    explanation: "macOS requires screen recording permission to capture system audio, even though Counterfoil records audio only.",
+                    settingsURL: CounterfoilPermissions.screenRecordingURL
+                )
+
+                HStack {
+                    Text("Status: (microphoneState.rawValue) · (screenRecordingState.rawValue)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Check status") { refreshPermissions() }
+                        .buttonStyle(.bordered)
+                        .frame(minHeight: 28)
+                        .contentShape(Rectangle())
+                }
+            }
+            .padding(.horizontal, 23)
+            .padding(.top, 17)
+            .padding(.bottom, 3)
+        }
+    }
+
+    private var readyPage: some View {
+        VStack(spacing: 13) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 43, weight: .medium))
+                .foregroundStyle(.green)
+                .padding(.top, 7)
+
+            Text("You're ready")
+                .font(.system(.title2, design: .rounded).weight(.semibold))
+
+            Text("Your next meeting will appear in the sidebar. Use Record Meeting when you’re ready; the title prompt comes first.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 365)
+
+            Label("Record Meeting", systemImage: "record.circle.fill")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(counterfoilRed)
+                .padding(.horizontal, 15)
+                .frame(minHeight: 34)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay {
+                    Capsule().stroke(counterfoilRed.opacity(0.35), lineWidth: 1)
+                }
+
+            if settings.hasAnyModels {
+                Label("A local transcription model is installed", systemImage: "checkmark.circle")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.green)
+            } else {
+                VStack(spacing: 7) {
+                    Text("Install a local model to enable transcription.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Download models") {
+                        openModelsSettings()
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(minWidth: 136, minHeight: 30)
+                    .contentShape(Rectangle())
+                }
+            }
+        }
+        .padding(.horizontal, 30)
+    }
+
+    private func refreshPermissions() {
+        microphoneState = CounterfoilPermissions.microphoneState()
+        screenRecordingState = CounterfoilPermissions.screenRecordingState()
+    }
+
+    private func openModelsSettings() {
+        UserDefaults.standard.set(true, forKey: "openModelsSettings")
+        finish()
+        DispatchQueue.main.async {
+            if #available(macOS 14.0, *) {
+                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            } else {
+                NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+            }
+        }
+    }
+
+    private func finish() {
+        hasSeenOnboarding = true
+        dismissWindow(id: Self.windowID)
+    }
+
+    private func skip() {
+        finish()
     }
 }

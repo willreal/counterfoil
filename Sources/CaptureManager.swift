@@ -172,6 +172,8 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
             } catch {
                 endActivityToken()
                 await MainActor.run {
+                    self.isRecording = false
+                    self.isPaused = false
                     self.status = "Error: \(error.localizedDescription)"
                 }
             }
@@ -236,7 +238,9 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
                     self.status = "Recording"
                 }
             } catch {
+                endActivityToken()
                 await MainActor.run {
+                    self.isRecording = false
                     self.isPaused = false
                     self.status = "Error: \(error.localizedDescription)"
                 }

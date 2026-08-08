@@ -37,11 +37,16 @@ struct CounterfoilApp: App {
 
         Window("Recording", id: RecordingPanelView.windowID) {
             RecordingPanelView(capture: capture, store: store)
-                .frame(width: 316)
                 .background(RecordingWindowConfigurator())
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 316, height: 366)
+        .defaultSize(width: 316, height: 340)
+        .windowResizability(.contentSize)
+
+        Window("Welcome to Counterfoil", id: OnboardingView.windowID) {
+            OnboardingView()
+        }
+        .defaultSize(width: 480, height: 360)
         .windowResizability(.contentSize)
 
         Settings {
