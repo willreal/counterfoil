@@ -396,6 +396,12 @@ class TranscriptStore: ObservableObject {
         DispatchQueue.main.async {
             self.sessions.insert(session, at: 0)
             self.selectedSession = stem
+            // load the transcript content NOW so the detail pane doesn't
+            // sit on "Loading..." (selection set programmatically bypasses
+            // the sidebar Binding setter that normally calls loadTranscript)
+            if let content = try? String(contentsOfFile: mdPath, encoding: .utf8) {
+                self.transcriptContent[session.id] = content
+            }
         }
     }
 
