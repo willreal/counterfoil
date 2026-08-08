@@ -13,24 +13,56 @@ struct Session: Identifiable, Codable {
     let dayDir: String
 }
 
+struct OrphanInfo: Identifiable {
+    let id = UUID()
+    let stem: String
+    let dayDir: URL
+    let systemFile: URL?
+    let micFile: URL?
+    let modDate: Date
+}
+
 class TranscriptStore: ObservableObject {
     @Published var sessions: [Session] = []
     @Published var transcriptContent: [String: String] = [:]
     @Published var selectedSession: String?
+    @Published var searchQuery: String = ""
+    @Published var orphanSessions: [OrphanInfo] = []
+    @Published var isImporting = false
+    @Published var isRecovering = false
 
     private let fm = FileManager.default
     private var autoDeleteTimer: Timer?
 
+    var displayedSessions: [Session] {
+        guard !searchQuery.isEmpty else { return sessions }
+        let q = searchQuery.lowercased()
+        return sessions.filter { session in
+            if session.title.lowercased().contains(q) || session.stem.lowercased().contains(q) {
+                return true
+            }
+            let mdPath = (session.dayDir as NSString).appendingPathComponent("\(session.stem).md")
+            if let content = try? String(contentsOfFile: mdPath, encoding: .utf8) {
+                return content.lowercased().contains(q)
+            }
+            return false
+        }
+    }
+
     func loadSessions() async {
         let baseDir = CaptureManager.baseDir
         var found: [Session] = []
+        var knownStems = Set<String>()
+        var dirs: [URL] = []
 
         guard let dayDirs = try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil) else {
             await MainActor.run { self.sessions = [] }
             return
         }
 
-        for dayDir in dayDirs.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
+        dirs = dayDirs.sorted(by: { $0.lastPathComponent > $1.lastPathComponent })
+
+        for dayDir in dirs {
             guard (try? dayDir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
             guard let files = try? fm.contentsOfDirectory(at: dayDir, includingPropertiesForKeys: nil) else { continue }
 
@@ -127,6 +159,7 @@ class TranscriptStore: ObservableObject {
                     dayDir: dayDir.path
                 )
                 found.append(session)
+                knownStems.insert(stem)
             }
         }
 
@@ -134,11 +167,200 @@ class TranscriptStore: ObservableObject {
         await MainActor.run {
             self.sessions = sorted
         }
+
+        // Detect orphans after building known stems
+        var orphans: [OrphanInfo] = []
+        for dayDir in dirs {
+            guard (try? dayDir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            orphans.append(contentsOf: detectOrphans(in: dayDir, knownStems: knownStems))
+        }
+
+        let finalOrphans = orphans
         await MainActor.run {
-            self.autoDeleteOldAudio()
+            self.orphanSessions = finalOrphans
+            if SettingsStore.shared.autoDeleteEnabled {
+                self.autoDeleteOldAudio()
+            }
             self.startAutoDeleteTimer()
         }
     }
+
+    // MARK: Orphan detection
+
+    private func detectOrphans(in dayDir: URL, knownStems: Set<String>) -> [OrphanInfo] {
+        var orphans: [OrphanInfo] = []
+        guard let files = try? fm.contentsOfDirectory(at: dayDir, includingPropertiesForKeys: [.contentModificationDateKey]) else {
+            return orphans
+        }
+
+        var candidates: [String: (systemFile: URL?, micFile: URL?, modDate: Date)] = [:]
+
+        for file in files {
+            let name = file.lastPathComponent
+            let modDate = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
+
+            if name.hasSuffix(".mic.m4a") {
+                let stem = String(name.dropLast(8))
+                let mdPath = dayDir.appendingPathComponent("\(stem).md")
+                if !fm.fileExists(atPath: mdPath.path) && !knownStems.contains(stem) {
+                    var entry = candidates[stem] ?? (nil, nil, modDate)
+                    entry.micFile = file
+                    if modDate < entry.modDate { entry.modDate = modDate }
+                    candidates[stem] = entry
+                }
+            } else if name.hasSuffix(".m4a") && !name.hasSuffix(".mic.m4a") {
+                let stem = String(name.dropLast(4))
+                let mdPath = dayDir.appendingPathComponent("\(stem).md")
+                if !fm.fileExists(atPath: mdPath.path) && !knownStems.contains(stem) {
+                    var entry = candidates[stem] ?? (nil, nil, modDate)
+                    entry.systemFile = file
+                    if modDate < entry.modDate { entry.modDate = modDate }
+                    candidates[stem] = entry
+                }
+            }
+        }
+
+        for (stem, info) in candidates {
+            orphans.append(OrphanInfo(
+                stem: stem, dayDir: dayDir,
+                systemFile: info.systemFile,
+                micFile: info.micFile,
+                modDate: info.modDate
+            ))
+        }
+
+        return orphans
+    }
+
+    // MARK: Orphan recovery actions
+
+    func recoverOrphan(_ orphan: OrphanInfo) async {
+        await MainActor.run { self.isRecovering = true }
+
+        var sysText = ""
+        var micText = ""
+
+        if let sysFile = orphan.systemFile {
+            do {
+                sysText = try await Transcriber.shared.transcribe(
+                    filePath: sysFile.path, startTime: orphan.modDate)
+            } catch {
+                sysText = "[transcribe error: \(error.localizedDescription)]"
+            }
+        }
+
+        if let micFile = orphan.micFile {
+            do {
+                micText = try await Transcriber.shared.transcribe(
+                    filePath: micFile.path, startTime: orphan.modDate)
+            } catch {
+                micText = "[transcribe error: \(error.localizedDescription)]"
+            }
+        }
+
+        let finalSysText = sysText
+        let finalMicText = micText
+        await MainActor.run {
+            addSession(
+                stem: orphan.stem,
+                title: orphan.stem,
+                dayDir: orphan.dayDir,
+                startTime: orphan.modDate,
+                systemText: finalSysText,
+                micText: finalMicText,
+                hasMicFile: orphan.micFile != nil,
+                duration: 0,
+                flaggedOffsets: [],
+                notes: [],
+                totalPausedDuration: 0
+            )
+            self.isRecovering = false
+            self.orphanSessions.removeAll(where: { $0.id == orphan.id })
+        }
+    }
+
+    func deleteOrphan(_ orphan: OrphanInfo) {
+        if let sys = orphan.systemFile {
+            try? fm.trashItem(at: sys, resultingItemURL: nil)
+        }
+        if let mic = orphan.micFile {
+            try? fm.trashItem(at: mic, resultingItemURL: nil)
+        }
+        DispatchQueue.main.async {
+            self.orphanSessions.removeAll(where: { $0.id == orphan.id })
+        }
+    }
+
+    // MARK: Import audio
+
+    func importAudio(url: URL) async {
+        await MainActor.run { self.isImporting = true }
+
+        let dayDir = CaptureManager.dayDir()
+        let baseTitle = url.deletingPathExtension().lastPathComponent
+        let sanitized = CaptureManager.sanitizeTitle(baseTitle.isEmpty ? "Imported" : baseTitle)
+        let dateStr = CaptureManager.formatDateTime(Date())
+        var stem = "\(sanitized) \(dateStr)"
+        var destURL = dayDir.appendingPathComponent("\(stem).m4a")
+
+        var counter = 1
+        while fm.fileExists(atPath: destURL.path) {
+            stem = "\(sanitized) \(dateStr) (\(counter))"
+            destURL = dayDir.appendingPathComponent("\(stem).m4a")
+            counter += 1
+        }
+
+        do {
+            try fm.copyItem(at: url, to: destURL)
+        } catch {
+            await MainActor.run { self.isImporting = false }
+            return
+        }
+
+        do {
+            let text = try await Transcriber.shared.transcribe(
+                filePath: destURL.path, startTime: Date())
+            let finalStem = stem
+            let finalText = text
+            await MainActor.run {
+                addSession(
+                    stem: finalStem,
+                    title: sanitized,
+                    dayDir: dayDir,
+                    startTime: Date(),
+                    systemText: finalText,
+                    micText: "",
+                    hasMicFile: false,
+                    duration: 0,
+                    flaggedOffsets: [],
+                    notes: [],
+                    totalPausedDuration: 0
+                )
+                self.isImporting = false
+            }
+        } catch {
+            let finalStem = stem
+            let errorMsg = error.localizedDescription
+            await MainActor.run {
+                addSession(
+                    stem: finalStem,
+                    title: sanitized,
+                    dayDir: dayDir,
+                    startTime: Date(),
+                    systemText: "[transcribe error: \(errorMsg)]",
+                    micText: "",
+                    hasMicFile: false,
+                    duration: 0,
+                    flaggedOffsets: [],
+                    notes: [],
+                    totalPausedDuration: 0
+                )
+                self.isImporting = false
+            }
+        }
+    }
+
+    // MARK: Session management
 
     func addSession(stem: String, title: String, dayDir: URL?, startTime: Date,
                     systemText: String, micText: String, hasMicFile: Bool, duration: TimeInterval,
@@ -241,6 +463,7 @@ class TranscriptStore: ObservableObject {
     }
 
     func autoDeleteOldAudio() {
+        if !SettingsStore.shared.autoDeleteEnabled { return }
         let cutoff = Date().addingTimeInterval(-7 * 24 * 3600)
         for session in sessions {
             guard session.hasSystemFile || session.hasMicFile else { continue }
@@ -273,8 +496,10 @@ class TranscriptStore: ObservableObject {
 
     private func startAutoDeleteTimer() {
         autoDeleteTimer?.invalidate()
-        autoDeleteTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
-            self?.autoDeleteOldAudio()
+        if SettingsStore.shared.autoDeleteEnabled {
+            autoDeleteTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+                self?.autoDeleteOldAudio()
+            }
         }
     }
 

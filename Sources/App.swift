@@ -20,6 +20,12 @@ struct CounterfoilApp: App {
         .windowStyle(.titleBar)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(after: .newItem) {
+                Button("Find") {
+                    NotificationCenter.default.post(name: NSNotification.Name("CounterfoilFind"), object: nil)
+                }
+                .keyboardShortcut("f", modifiers: .command)
+            }
             CommandMenu("Recording") {
                 Button(capture.isRecording ? "Stop Recording" : "Start Recording") {
                     if capture.isRecording {
@@ -51,5 +57,10 @@ struct CounterfoilApp: App {
                 .disabled(!capture.isRecording || capture.isPaused)
             }
         }
+
+        Settings {
+            SettingsView()
+        }
+        .windowResizability(.contentSize)
     }
 }

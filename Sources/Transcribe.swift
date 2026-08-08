@@ -121,7 +121,7 @@ final class Transcriber {
                 fullText += "[\(ts)] \(text)\n"
             }
         }
-        return fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return applyPostProcessing(fullText.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     func forceLoadSync() throws {
@@ -182,7 +182,7 @@ final class Transcriber {
             let (enc, encLen) = try encode(mel: mel, melLength: melLen)
             fullText += try decode(enc: enc, encLen: encLen) + " "
         }
-        return fullText.trimmingCharacters(in: .whitespaces)
+        return applyPostProcessing(fullText.trimmingCharacters(in: .whitespaces))
     }
 
     // MARK: Preprocessing
@@ -462,4 +462,42 @@ func formatTimestamp(_ date: Date) -> String {
     let df = DateFormatter()
     df.dateFormat = "HH:mm:ss"
     return df.string(from: date)
+}
+
+// MARK: Post-processing (filler stripping + vocabulary)
+
+extension Transcriber {
+    static func stripFillers(_ text: String) -> String {
+        let fillers = ["uh-huh", "uh huh", "um", "uh", "erm", "er", "hmm", "mm", "mhm"]
+        let pattern = "\\b(" + fillers.map { NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "|") + ")\\b"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return text }
+        let range = NSRange(text.startIndex..., in: text)
+        let result = regex.stringByReplacingMatches(in: text, range: range, withTemplate: "")
+        let collapsed = result.replacingOccurrences(of: " {2,}", with: " ", options: .regularExpression)
+        return collapsed.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func applyVocabulary(_ text: String, pairs: [(String, String)]) -> String {
+        guard !pairs.isEmpty else { return text }
+        var result = text
+        for (from, to) in pairs {
+            guard !from.isEmpty, !to.isEmpty else { continue }
+            let pattern = "\\b" + NSRegularExpression.escapedPattern(for: from) + "\\b"
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+            result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: to)
+        }
+        return result
+    }
+
+    private func applyPostProcessing(_ text: String) -> String {
+        var processed = Self.stripFillers(text)
+        let pairs = SettingsStore.shared.vocabularyPairs
+        if !pairs.isEmpty {
+            processed = Self.applyVocabulary(processed, pairs: pairs.map { ($0.from, $0.to) })
+        }
+        return processed
+    }
 }

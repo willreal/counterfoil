@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import UniformTypeIdentifiers
 
 class TranscriptPlayer: ObservableObject {
     @Published var isPlaying = false
@@ -96,6 +97,9 @@ struct ContentView: View {
     @State private var noteText = ""
     @State private var showNotePopover = false
     @State private var playStatusTime: String = ""
+    @State private var showSearch = false
+    @State private var showImportPicker = false
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         NavigationSplitView {
@@ -108,6 +112,48 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup {
                 Spacer()
+
+                if showSearch {
+                    HStack(spacing: 4) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                        TextField("Search...", text: $store.searchQuery)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 200)
+                            .focused($searchFocused)
+                            .onSubmit {
+                                if store.searchQuery.isEmpty {
+                                    showSearch = false
+                                }
+                            }
+                        if !store.searchQuery.isEmpty {
+                            Button {
+                                store.searchQuery = ""
+                                showSearch = false
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                } else {
+                    Button {
+                        showSearch = true
+                        searchFocused = true
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+                    .help("Find (⌘F)")
+                }
+
+                Button {
+                    showImportPicker = true
+                } label: {
+                    Image(systemName: "square.and.arrow.down")
+                }
+                .help("Import audio file")
+                .disabled(capture.isRecording)
 
                 if capture.isRecording {
                     HStack(spacing: 6) {
@@ -206,6 +252,27 @@ struct ContentView: View {
         .sheet(isPresented: $capture.showTitlePrompt) {
             titleSheet
         }
+        .fileImporter(isPresented: $showImportPicker, allowedContentTypes: [.audio]) { result in
+            if case .success(let url) = result {
+                guard url.startAccessingSecurityScopedResource() else { return }
+                defer { url.stopAccessingSecurityScopedResource() }
+                Task {
+                    await store.importAudio(url: url)
+                }
+            }
+        }
+        .alert("Low Disk Space", isPresented: $capture.showLowDiskAlert) {
+            Button("Cancel", role: .cancel) {}
+            Button("Continue") {
+                capture.confirmLowDiskStart()
+            }
+        } message: {
+            Text("Less than 2 GB of free disk space available. Recording may fail if space runs out.")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CounterfoilFind"))) { _ in
+            showSearch = true
+            searchFocused = true
+        }
     }
 
     func commitNote() {
@@ -278,8 +345,29 @@ struct ContentView: View {
                 }
             }
         )) {
-            if store.sessions.isEmpty {
-                emptySidebar
+            if !store.orphanSessions.isEmpty && store.searchQuery.isEmpty {
+                Section(header: Text("Recoverable").font(.headline).foregroundColor(.orange)) {
+                    ForEach(store.orphanSessions) { orphan in
+                        orphanRow(orphan)
+                    }
+                }
+            }
+
+            if store.displayedSessions.isEmpty {
+                if store.searchQuery.isEmpty {
+                    emptySidebar
+                } else {
+                    VStack(spacing: 8) {
+                        Text("No results")
+                            .font(.headline)
+                            .foregroundColor(.secondary)
+                        Text("for \"\(store.searchQuery)\"")
+                            .font(.caption)
+                            .foregroundColor(Color(nsColor: .tertiaryLabelColor))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding()
+                }
             } else {
                 ForEach(groupedDays(), id: \.0) { day, daySessions in
                     Section(header: Text(day).font(.headline).foregroundColor(.secondary)) {
@@ -292,6 +380,36 @@ struct ContentView: View {
         }
         .listStyle(.sidebar)
         .background(coralBackground)
+    }
+
+    func orphanRow(_ orphan: OrphanInfo) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Recoverable recording")
+                    .font(.body.bold())
+                Text(orphan.stem)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Menu {
+                Button {
+                    Task { await store.recoverOrphan(orphan) }
+                } label: {
+                    Label("Transcribe", systemImage: "text.word.spacing")
+                }
+                Button(role: .destructive) {
+                    store.deleteOrphan(orphan)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 2)
     }
 
     func loadPlayer(for session: Session) {
@@ -532,6 +650,16 @@ struct ContentView: View {
         }
     }
 
+    func highlightColor(for line: TranscriptLineItem) -> Color {
+        if !store.searchQuery.isEmpty && line.raw.lowercased().contains(store.searchQuery.lowercased()) {
+            return Color.yellow.opacity(0.3)
+        }
+        if player.hasAudio && player.activeOffset == line.timestamp && player.isPlaying {
+            return Color.accentColor.opacity(0.12)
+        }
+        return Color.clear
+    }
+
     func transcriptBody(session: Session) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -544,6 +672,7 @@ struct ContentView: View {
                                 .font(.system(.body))
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, line.isEmpty ? 0 : 4)
+                                .background(highlightColor(for: line))
                         } else {
                             Button {
                                 if player.hasAudio, let ts = line.timestamp {
@@ -559,11 +688,7 @@ struct ContentView: View {
                             .padding(.horizontal, 16)
                             .padding(.vertical, 3)
                             .contentShape(Rectangle())
-                            .background(
-                                player.hasAudio && player.activeOffset == line.timestamp && player.isPlaying
-                                    ? Color.accentColor.opacity(0.12)
-                                    : Color.clear
-                            )
+                            .background(highlightColor(for: line))
                             .id(line.id)
                             .onHover { hovering in
                                 if hovering && player.hasAudio && line.timestamp != nil {
@@ -712,12 +837,13 @@ struct ContentView: View {
     }
 
     func groupedDays() -> [(String, [Session])] {
+        let sessions = store.displayedSessions
         let df = DateFormatter()
         df.dateStyle = .medium
         df.timeStyle = .none
 
         var groups: [String: [Session]] = [:]
-        for s in store.sessions {
+        for s in sessions {
             let key = df.string(from: s.startTime)
             groups[key, default: []].append(s)
         }
@@ -734,5 +860,142 @@ struct ContentView: View {
         let df = DateFormatter()
         df.dateFormat = "HH:mm"
         return df.string(from: date)
+    }
+}
+
+// MARK: Settings
+
+struct SettingsView: View {
+    var body: some View {
+        TabView {
+            VocabSettingsView()
+                .tabItem { Label("Vocabulary", systemImage: "textformat.abc") }
+            GeneralSettingsView()
+                .tabItem { Label("General", systemImage: "gearshape") }
+        }
+        .frame(width: 480, height: 380)
+    }
+}
+
+struct GeneralSettingsView: View {
+    @ObservedObject var settings = SettingsStore.shared
+    @State private var selectedModel: String
+
+    init() {
+        _selectedModel = State(initialValue: SettingsStore.shared.selectedModel)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Automatically delete audio after 7 days", isOn: $settings.autoDeleteEnabled)
+                Text("Transcripts are always kept. When enabled, audio files older than 7 days are moved to Trash.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Section("Transcription Model") {
+                if settings.availableModels.isEmpty {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundColor(.orange)
+                        VStack(alignment: .leading) {
+                            Text("No models installed")
+                                .font(.body.bold())
+                            Text(Transcriber.shared.modelsMissingReason)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                } else {
+                    Picker("Model", selection: $selectedModel) {
+                        ForEach(settings.availableModels, id: \.self) { model in
+                            Text(model).tag(model)
+                        }
+                    }
+                    .onChange(of: selectedModel) { _, newValue in
+                        settings.selectedModel = newValue
+                    }
+                    Text("The selected model is used for all future transcriptions.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct VocabSettingsView: View {
+    @ObservedObject var settings = SettingsStore.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Case-insensitive, word-boundary-aware replacements applied during transcription.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(12)
+
+            HStack {
+                Text("From").fontWeight(.semibold).frame(maxWidth: .infinity, alignment: .leading)
+                Text("To").fontWeight(.semibold).frame(maxWidth: .infinity, alignment: .leading)
+                Spacer().frame(width: 28)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+
+            ScrollView {
+                if #available(macOS 15.0, *) {
+                    ForEach(Array(settings.vocabularyPairs.enumerated()), id: \.element.id) { _, pair in
+                        vocabRow(pair)
+                    }
+                } else {
+                    ForEach(settings.vocabularyPairs) { pair in
+                        vocabRow(pair)
+                    }
+                }
+            }
+
+            Button {
+                settings.vocabularyPairs.append(VocabularyPair(from: "", to: ""))
+            } label: {
+                Label("Add Replacement", systemImage: "plus")
+            }
+            .padding(12)
+        }
+    }
+
+    func vocabRow(_ pair: VocabularyPair) -> some View {
+        HStack {
+            TextField("e.g., tachy board", text: Binding(
+                get: { pair.from },
+                set: { newValue in
+                    if let i = settings.vocabularyPairs.firstIndex(where: { $0.id == pair.id }) {
+                        settings.vocabularyPairs[i].from = newValue
+                    }
+                }
+            ))
+            .textFieldStyle(.roundedBorder)
+            TextField("e.g., Tachyboard", text: Binding(
+                get: { pair.to },
+                set: { newValue in
+                    if let i = settings.vocabularyPairs.firstIndex(where: { $0.id == pair.id }) {
+                        settings.vocabularyPairs[i].to = newValue
+                    }
+                }
+            ))
+            .textFieldStyle(.roundedBorder)
+            Button {
+                if let i = settings.vocabularyPairs.firstIndex(where: { $0.id == pair.id }) {
+                    settings.vocabularyPairs.remove(at: i)
+                }
+            } label: {
+                Image(systemName: "minus.circle.fill")
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 2)
     }
 }

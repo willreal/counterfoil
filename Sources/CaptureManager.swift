@@ -12,6 +12,7 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
     @Published var recordingStartTime: Date?
     @Published var showTitlePrompt = false
     @Published var micLevel: CGFloat = 0
+    @Published var showLowDiskAlert = false
 
     private var stream: SCStream?
     private var assetWriter: AVAssetWriter?
@@ -24,6 +25,7 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
     private var started = false
     private var finished = false
     private var failure: String?
+    private var pendingTitleForLowDisk: String = ""
 
     private var audioEngine: AVAudioEngine?
     private var micFile: AVAudioFile?
@@ -95,6 +97,24 @@ class CaptureManager: NSObject, SCStreamOutput, ObservableObject {
     }
 
     func start(title: String) {
+        let docsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        if let values = try? docsURL.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+           let available = values.volumeAvailableCapacityForImportantUsage {
+            let twoGB: Int64 = 2 * 1024 * 1024 * 1024
+            if available < twoGB {
+                pendingTitleForLowDisk = title
+                DispatchQueue.main.async { self.showLowDiskAlert = true }
+                return
+            }
+        }
+        startInternal(title: title)
+    }
+
+    func confirmLowDiskStart() {
+        startInternal(title: pendingTitleForLowDisk)
+    }
+
+    private func startInternal(title: String) {
         let now = Date()
         recordingStartTime = now
         let sanitized = Self.sanitizeTitle(title)

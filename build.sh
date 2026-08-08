@@ -28,7 +28,7 @@ swiftc -O -swift-version 5 \
     -target arm64-apple-macos15.0 \
     -sdk "$SDK" \
     -framework AVFoundation -framework CoreML \
-    Sources/Transcribe.swift cli/CLIMain.swift \
+    Sources/Transcribe.swift Sources/SettingsStore.swift cli/CLIMain.swift \
     -o build/cli/counterfoil-cli
 
 echo "==> Copying Info.plist"
