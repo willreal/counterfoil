@@ -23,7 +23,7 @@ export CLANG_MODULE_CACHE_PATH="${COUNTERFOIL_MODULE_CACHE}"
 echo "==> Compiling app (Sources/*.swift)"
 swiftc -O -swift-version 5 \
     -parse-as-library \
-    -target arm64-apple-macos15.0 \
+    -target arm64-apple-macos26.0 \
     -sdk "$SDK" \
     $FRAMEWORKS \
     Sources/*.swift \
@@ -33,7 +33,7 @@ echo "==> Compiling CLI harness (counterfoil-cli)"
 mkdir -p build/cli
 swiftc -O -swift-version 5 \
     -parse-as-library \
-    -target arm64-apple-macos15.0 \
+    -target arm64-apple-macos26.0 \
     -sdk "$SDK" \
     -framework AVFoundation -framework CoreML \
     Sources/Transcribe.swift Sources/SettingsStore.swift cli/CLIMain.swift \

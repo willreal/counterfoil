@@ -408,30 +408,16 @@ struct ContentView: View {
         }
         .padding(.horizontal, 9)
         .frame(width: 170, height: 28)
-        // Single-layer field: plain fill + one stroke. No nested material
-        // capsule (the toolbar glass strip is the outer surface already).
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
-        .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(Color.primary.opacity(0.14), lineWidth: 1)
-        }
-        .padding(.trailing, 10)
         .help("Search titles and transcripts")
     }
 
     private func toolbarButtonLabel(_ title: String, systemImage: String) -> some View {
+        // Native macOS 26: toolbar items sit on the toolbar's liquid glass
+        // surface and are styled by the system. No hand-drawn backgrounds —
+        // that produced old-style (pre-Tahoe) button artwork.
         Label(title, systemImage: systemImage)
             .font(.system(size: 12, weight: .medium))
-            .padding(.horizontal, 8)
-            .frame(height: 27)
-            .contentShape(RoundedRectangle(cornerRadius: 7))   // hit area = whole pill
-            // Same single-layer treatment as the search field: no nested
-            // material capsule inside the toolbar's glass strip.
-            .background(Color(nsColor: .textBackgroundColor).opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
-            .overlay {
-                RoundedRectangle(cornerRadius: 7)
-                    .stroke(Color.primary.opacity(0.14), lineWidth: 1)
-            }
+            .labelStyle(.titleAndIcon)
     }
 
     private var toolbarDeleteLabel: some View {
@@ -446,14 +432,6 @@ struct ContentView: View {
         // action) and the destructive items inside the menu itself.
         // (QA: "red serves destructive, primary action, and status roles".)
         .foregroundStyle(.primary)
-        .padding(.horizontal, 8)
-        .frame(height: 27)
-        .contentShape(RoundedRectangle(cornerRadius: 7))   // hit area = whole pill
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
-        .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .stroke(Color.primary.opacity(0.14), lineWidth: 1)
-        }
     }
 
     private var sidebarFooter: some View {
@@ -467,19 +445,10 @@ struct ContentView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
                     .frame(maxWidth: .infinity, minHeight: 36)
-                    .contentShape(Capsule())   // hit area = whole pill
             }
-            .buttonStyle(.borderless)
-            // Solid red primary action (user: "make the record button solid red")
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .background {
-                Capsule()
-                    .fill(counterfoilRed)
-            }
-            .overlay {
-                Capsule().stroke(counterfoilRed.opacity(0.9), lineWidth: 1)
-            }
+            // Native macOS 26 primary action: prominent liquid glass + red tint.
+            .buttonStyle(.glassProminent)
+            .tint(counterfoilRed)
             .help("Start a recording")
             .disabled(capture.isRecording)
         }
@@ -1457,11 +1426,9 @@ struct RecordingPanelView: View {
                     .font(.system(size: 17, weight: .bold))
                     .frame(maxWidth: .infinity, minHeight: 50)
             }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.white)
-            .background(counterfoilRed, in: RoundedRectangle(cornerRadius: 14))
-            .shadow(color: counterfoilRed.opacity(0.32), radius: 10, y: 4)
-            .contentShape(RoundedRectangle(cornerRadius: 14))
+            // Native prominent glass in red — the panel's primary action.
+            .buttonStyle(.glassProminent)
+            .tint(counterfoilRed)
             .padding(.top, 16)
         }
         .padding(.horizontal, 17)
@@ -1625,11 +1592,9 @@ struct RecordingPanelView: View {
                 Label("Save Note", systemImage: "arrow.up.circle.fill")
                     .font(.system(.callout, design: .rounded).weight(.semibold))
                     .frame(maxWidth: .infinity, minHeight: 36)
-                    .contentShape(RoundedRectangle(cornerRadius: 9))   // hit area = whole button
             }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.white)
-            .background(counterfoilRed, in: RoundedRectangle(cornerRadius: 9))
+            .buttonStyle(.glassProminent)
+            .tint(counterfoilRed)
             .disabled(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .opacity(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.48 : 1)
             .keyboardShortcut(.return, modifiers: .command)
