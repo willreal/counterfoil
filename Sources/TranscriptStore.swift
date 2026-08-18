@@ -122,21 +122,24 @@ class TranscriptStore: ObservableObject {
     @Published private(set) var sessionAnnotations: [String: TranscriptAnnotations] = [:]
     @Published var selectedSession: String?
     @Published var searchQuery: String = ""
+    @Published var searchScope: TranscriptSearchScope = .all
     @Published var orphanSessions: [OrphanInfo] = []
     @Published var isRecovering = false
     @Published private var searchDocuments: [String: String] = [:]
+    @Published private var searchIndexes: [String: TranscriptSearchIndex] = [:]
 
     private let fm = FileManager.default
     private var autoDeleteTimer: Timer?
 
     var displayedSessions: [Session] {
-        guard !searchQuery.isEmpty else { return sessions }
-        let q = searchQuery.lowercased()
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return sessions }
         return sessions.filter { session in
-            if session.title.lowercased().contains(q) || session.stem.lowercased().contains(q) {
+            if searchScope == .all,
+               session.title.localizedCaseInsensitiveContains(query) || session.stem.localizedCaseInsensitiveContains(query) {
                 return true
             }
-            return searchDocuments[session.id]?.lowercased().contains(q) == true
+            return searchIndexes[session.id]?.text(for: searchScope).localizedCaseInsensitiveContains(query) == true
         }
     }
 
@@ -144,26 +147,14 @@ class TranscriptStore: ObservableObject {
     /// Title/filename hits get a quiet explanation; transcript hits use the
     /// matching markdown line so the result is actionable at a glance.
     func searchContext(for session: Session) -> String? {
-        guard !searchQuery.isEmpty else { return nil }
-        let query = searchQuery.lowercased()
-
-        if session.title.lowercased().contains(query) || session.stem.lowercased().contains(query) {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return nil }
+        if searchScope == .all,
+           session.title.localizedCaseInsensitiveContains(query) || session.stem.localizedCaseInsensitiveContains(query) {
             return "Title match · \(session.stem)"
         }
-
         guard let content = searchDocuments[session.id] else { return nil }
-        for rawLine in content.components(separatedBy: .newlines) {
-            guard rawLine.lowercased().contains(query) else { continue }
-            let line = rawLine
-                .replacingOccurrences(of: "**", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if line.isEmpty { continue }
-            if line.count > 94 {
-                return String(line.prefix(91)) + "…"
-            }
-            return line
-        }
-        return nil
+        return TranscriptSearchSupport.context(in: content, query: query, scope: searchScope)
     }
 
     func loadSessions() async {
@@ -339,9 +330,11 @@ class TranscriptStore: ObservableObject {
 
         let sorted = found.sorted(by: { $0.startTime > $1.startTime })
         let finalIndexedDocuments = indexedDocuments
+        let finalSearchIndexes = indexedDocuments.mapValues { TranscriptSearchSupport.makeIndex(from: $0) }
         await MainActor.run {
             self.sessions = sorted
             self.searchDocuments = finalIndexedDocuments
+            self.searchIndexes = finalSearchIndexes
         }
 
         // Detect orphans after building known stems
@@ -526,6 +519,7 @@ class TranscriptStore: ObservableObject {
         replaceSession(completedSession)
         transcriptContent[completedSession.id] = content
         searchDocuments[completedSession.id] = content
+        searchIndexes[completedSession.id] = TranscriptSearchSupport.makeIndex(from: content)
         refreshAnnotations(for: completedSession.id, content: content)
         selectedSession = completedSession.id
     }
@@ -687,6 +681,7 @@ class TranscriptStore: ObservableObject {
             if let content = try? String(contentsOf: mdPath, encoding: .utf8) {
                 self.transcriptContent[session.id] = content
                 self.searchDocuments[session.id] = content
+                self.searchIndexes[session.id] = TranscriptSearchSupport.makeIndex(from: content)
                 self.refreshAnnotations(for: session.id, content: content)
             }
         }
@@ -704,6 +699,7 @@ class TranscriptStore: ObservableObject {
                 guard self.transcriptContent[session.id] == nil else { return }
                 self.transcriptContent[session.id] = content
                 self.searchDocuments[session.id] = content
+                self.searchIndexes[session.id] = TranscriptSearchSupport.makeIndex(from: content)
                 self.refreshAnnotations(for: session.id, content: content)
             }
         }
@@ -814,6 +810,8 @@ class TranscriptStore: ObservableObject {
         DispatchQueue.main.async {
             self.sessions.removeAll(where: { $0.id == session.id })
             self.transcriptContent.removeValue(forKey: session.id)
+            self.searchDocuments.removeValue(forKey: session.id)
+            self.searchIndexes.removeValue(forKey: session.id)
             self.sessionAnnotations.removeValue(forKey: session.id)
             if self.selectedSession == session.id {
                 self.selectedSession = nil
@@ -915,6 +913,7 @@ class TranscriptStore: ObservableObject {
             try data.write(to: mdURL, options: [.atomic])
             transcriptContent[session.id] = updatedContent
             searchDocuments[session.id] = updatedContent
+            searchIndexes[session.id] = TranscriptSearchSupport.makeIndex(from: updatedContent)
             refreshAnnotations(for: session.id, content: updatedContent)
         } catch {
             print("transcript rewrite error: \(error)")
