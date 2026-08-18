@@ -218,6 +218,7 @@ struct RecordingWindowView: View {
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
+                .keyboardShortcut(.return, modifiers: [.command])
                 .disabled(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .opacity(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.5 : 1)
                 .help("Save note")
