@@ -40,11 +40,14 @@ class SettingsStore: ObservableObject {
 
     private init() {
         let storedRetention = UserDefaults.standard.object(forKey: "autoDeleteAudio") as? Bool
-        self.availableModels = Transcriber.scanAvailableModels()
+        let scannedModels = Transcriber.scanAvailableModels()
+        let storedModel = UserDefaults.standard.string(forKey: "selectedModel")
+        self.availableModels = scannedModels
         self.autoDeleteEnabled = storedRetention ?? false
         self.hasChosenAudioRetention = storedRetention != nil
             || UserDefaults.standard.bool(forKey: "hasChosenAudioRetention")
-        self.selectedModel = UserDefaults.standard.string(forKey: "selectedModel") ?? "Parakeet V2"
+        self.selectedModel = storedModel.flatMap { scannedModels.contains($0) ? $0 : nil }
+            ?? (scannedModels.count == 1 ? scannedModels[0] : "")
         self.vocabularyPairs = Self.loadVocabulary()
     }
 
@@ -55,7 +58,11 @@ class SettingsStore: ObservableObject {
     }
 
     func refreshAvailableModels() {
-        availableModels = Transcriber.scanAvailableModels()
+        let refreshed = Transcriber.scanAvailableModels()
+        availableModels = refreshed
+        if !refreshed.contains(selectedModel) {
+            selectedModel = refreshed.count == 1 ? refreshed[0] : ""
+        }
     }
 
     private func saveVocabulary() {

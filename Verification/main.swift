@@ -34,6 +34,7 @@ struct CounterfoilCoreVerification {
         check(RecordingReliabilityTestSupport.missingSourcePropagatesRenameFailure(), "Missing source failure")
         check(RecordingReliabilityTestSupport.capacityAndNoteBoundariesPass(), "Capacity and note timing")
         check(RecordingReliabilityTestSupport.recoveryActionsCoverFailureMatrix(), "Recovery actions")
+        check(RecordingReliabilityTestSupport.segmentTimelineMetadataPasses(), "Segment timeline metadata")
 
         print("CounterfoilCoreVerification passed \(count) checks")
     }

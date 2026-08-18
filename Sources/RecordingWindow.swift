@@ -7,7 +7,7 @@ struct RecordingWindowView: View {
     static let windowID = "recording-panel"
 
     @ObservedObject var capture: CaptureManager
-    @ObservedObject var store: TranscriptStore
+    let store: TranscriptStore
 
     @Environment(\.dismiss) private var dismissWindowContent
     @Environment(\.dismissWindow) private var dismissWindow

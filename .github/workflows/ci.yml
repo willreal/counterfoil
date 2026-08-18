@@ -1,0 +1,47 @@
+name: Counterfoil CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - name: Core tests
+        run: swift test
+      - name: Full native build
+        run: bash build.sh
+      - name: Production reliability integration
+        run: |
+          SDK="$(xcrun --show-sdk-path)"
+          swiftc -O -swift-version 5 -parse-as-library \
+            -target arm64-apple-macos26.0 -sdk "$SDK" \
+            -framework SwiftUI -framework AppKit -framework ScreenCaptureKit \
+            -framework AVFoundation -framework CoreML -framework Combine \
+            Sources/RecordingModels.swift \
+            Sources/RecordingReliability.swift \
+            Sources/SettingsStore.swift \
+            Sources/Transcribe.swift \
+            Sources/TranscriptionCoordinator.swift \
+            Sources/TranscriptSearch.swift \
+            Sources/TranscriptStore.swift \
+            Sources/CaptureManager.swift \
+            Verification/ProductionReliabilityChecks.swift \
+            -o /tmp/counterfoil-production-checks
+          /tmp/counterfoil-production-checks
+      - name: Regression source checks
+        run: |
+          test ! -e main
+          grep -q 'struct ContentView: View' Sources/Views.swift
+          grep -q '    let capture: CaptureManager' Sources/Views.swift
+          grep -q 'excludingApplications: excludedApplications' Sources/CaptureManager.swift
+          grep -q 'systemSegments: \[SessionAudioSegmentMetadata\]' Sources/RecordingModels.swift
+          grep -q 'TranscriptionCoordinator.shared.transcribeSession' Sources/CaptureManager.swift
+          grep -q 'failedMetadata.title = latest.title' Sources/TranscriptStore.swift
+          grep -q 'scannedModels.count == 1' Sources/SettingsStore.swift
+          grep -q 'AudioFinalizer timeline export failed' Verification/ProductionReliabilityChecks.swift
+          grep -q '.windowStyle(.titleBar)' Verification/RecordingPanelPreview.swift

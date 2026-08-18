@@ -5,7 +5,7 @@ struct CLIMain {
     static func main() {
         let args = CommandLine.arguments
         var wavPath: String?
-        var modelName: String = "Parakeet V2"
+        var modelName: String?
 
         var i = 1
         while i < args.count {
@@ -24,8 +24,11 @@ struct CLIMain {
         if let path = wavPath {
             do {
                 let transcriber = Transcriber.shared
-                SettingsStore.shared.selectedModel = modelName
-                try transcriber.forceLoadSync()
+                let resolvedModel = modelName ?? SettingsStore.shared.selectedModel
+                guard !resolvedModel.isEmpty else {
+                    throw NSError(domain: "counterfoil-cli", code: 1, userInfo: [NSLocalizedDescriptionKey: "Specify --model or install/select a model first"])
+                }
+                try transcriber.forceLoadSync(modelName: resolvedModel)
                 let text = try transcriber.transcribeTest(path: path)
                 print(text)
             } catch {
