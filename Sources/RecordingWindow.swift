@@ -16,7 +16,6 @@ struct RecordingWindowView: View {
 
     @State private var titleDraft = ""
     @State private var noteDraft = ""
-    @State private var noteIsOpen = false
     @FocusState private var titleIsFocused: Bool
     @FocusState private var noteIsFocused: Bool
 
@@ -27,16 +26,14 @@ struct RecordingWindowView: View {
         VStack(spacing: 0) {
             header
             controls
-            if noteIsOpen {
-                noteTray
-            }
             if case .failed(let failure) = capture.phase {
                 failureTray(failure)
+            } else {
+                noteTray
             }
         }
         .frame(width: windowWidth)
         .background(windowBackground)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: noteIsOpen)
         .onAppear {
             titleDraft = SessionNaming.editorDraft(for: capture.activeTitle)
         }
@@ -50,7 +47,7 @@ struct RecordingWindowView: View {
                 closeWindow()
             }
             if case .failed = phase {
-                closeNote()
+                resetNoteDraft()
             }
         }
         .onChange(of: titleIsFocused) { _, isFocused in
@@ -58,9 +55,17 @@ struct RecordingWindowView: View {
                 commitTitle()
             }
         }
+        .onChange(of: noteIsFocused) { _, isFocused in
+            if isFocused {
+                if capture.phase.canStop, capture.noteTimestamp == nil {
+                    _ = capture.beginNote()
+                }
+            } else if noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                capture.cancelPendingNote()
+            }
+        }
         .onDisappear {
-            noteIsOpen = false
-            noteIsFocused = false
+            resetNoteDraft()
         }
         .fixedSize()
         .accessibilityElement(children: .contain)
@@ -91,7 +96,7 @@ struct RecordingWindowView: View {
                 .accessibilityLabel("Recording time \(formatRecordingClock(capture.recordingDuration))")
         }
         .padding(.horizontal, 12)
-        .frame(height: 40)
+        .frame(height: 48)
     }
 
     @ViewBuilder
@@ -122,15 +127,6 @@ struct RecordingWindowView: View {
                     ) {
                         capture.flagCurrentMoment()
                     }
-
-                    controlButton(
-                        title: noteIsOpen ? "Close note" : "Add a note",
-                        symbol: "note.text",
-                        tint: titleColor,
-                        enabled: capture.phase.canStop
-                    ) {
-                        toggleNote()
-                    }
                 }
 
                 Spacer(minLength: 0)
@@ -139,6 +135,7 @@ struct RecordingWindowView: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 48)
+            .padding(.bottom, 3)
         }
     }
 
@@ -217,7 +214,7 @@ struct RecordingWindowView: View {
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(.white)
                         .frame(width: 36, height: 36)
-                        .background(Color.white.opacity(0.18), in: Circle())
+                        .background(Color.black, in: Circle())
                         .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -231,7 +228,6 @@ struct RecordingWindowView: View {
         .padding(.top, 15)
         .padding(.bottom, 10)
         .frame(width: windowWidth, height: noteHeight, alignment: .top)
-        .background(noteBackground)
         .environment(\.colorScheme, .dark)
     }
 
@@ -301,39 +297,20 @@ struct RecordingWindowView: View {
         .padding(.top, 15)
         .padding(.bottom, 10)
         .frame(width: windowWidth, height: 190)
-        .background(noteBackground)
         .environment(\.colorScheme, .dark)
-    }
-
-    private func toggleNote() {
-        if noteIsOpen {
-            closeNote()
-            return
-        }
-
-        _ = capture.beginNote()
-        noteIsOpen = true
-        Task { @MainActor in
-            if !reduceMotion {
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
-            guard noteIsOpen else { return }
-            noteIsFocused = true
-        }
-    }
-
-    private func closeNote() {
-        capture.cancelPendingNote()
-        noteDraft = ""
-        noteIsOpen = false
-        noteIsFocused = false
     }
 
     private func commitNote() {
         let trimmed = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         capture.addNote(trimmed, at: capture.noteTimestamp ?? capture.currentElapsedTime())
-        closeNote()
+        noteDraft = ""
+    }
+
+    private func resetNoteDraft() {
+        capture.cancelPendingNote()
+        noteDraft = ""
+        noteIsFocused = false
     }
 
     private func commitTitle() {
@@ -354,23 +331,43 @@ struct RecordingWindowView: View {
             capture.cancelPendingNote()
         }
         noteDraft = ""
-        noteIsOpen = false
         noteIsFocused = false
         capture.stop(store: store)
     }
 
     private func closeWindow() {
-        noteIsOpen = false
-        noteIsFocused = false
+        resetNoteDraft()
         dismissWindow(id: Self.windowID)
         dismissWindowContent()
     }
 
-    private var windowBackground: Color {
+    private var panelTopColor: Color {
         colorScheme == .dark
             ? Color(red: 0.14, green: 0.14, blue: 0.15)
             : Color(red: 0.81, green: 0.815, blue: 0.825)
     }
+
+    private var noteSurfaceColor: Color {
+        Color(red: 36.0 / 255.0, green: 36.0 / 255.0, blue: 36.0 / 255.0)
+    }
+
+    private var windowBackground: LinearGradient {
+    LinearGradient(
+        stops: [
+            .init(color: panelTopColor, location: 0),
+            .init(color: panelTopColor, location: 0.24),
+            .init(color: Color(red: 185.0 / 255.0, green: 186.0 / 255.0, blue: 187.0 / 255.0), location: 0.32),
+            .init(color: Color(red: 139.0 / 255.0, green: 139.0 / 255.0, blue: 140.0 / 255.0), location: 0.40),
+            .init(color: Color(red: 104.0 / 255.0, green: 104.0 / 255.0, blue: 105.0 / 255.0), location: 0.48),
+            .init(color: Color(red: 79.0 / 255.0, green: 79.0 / 255.0, blue: 80.0 / 255.0), location: 0.56),
+            .init(color: Color(red: 51.0 / 255.0, green: 52.0 / 255.0, blue: 52.0 / 255.0), location: 0.69),
+            .init(color: Color(red: 38.0 / 255.0, green: 38.0 / 255.0, blue: 38.0 / 255.0), location: 0.85),
+            .init(color: noteSurfaceColor, location: 1)
+        ],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+}
 
     private var controlBackground: Color {
         colorScheme == .dark
@@ -383,16 +380,4 @@ struct RecordingWindowView: View {
             ? Color.white.opacity(0.78)
             : Color.black.opacity(0.58)
     }
-
-    private var noteBackground: LinearGradient {
-        LinearGradient(
-            colors: [
-                Color.black.opacity(colorScheme == .dark ? 0.13 : 0.08),
-                Color.black.opacity(colorScheme == .dark ? 0.34 : 0.22)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
 }
-

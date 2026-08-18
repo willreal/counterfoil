@@ -54,7 +54,7 @@ struct CounterfoilApp: App {
                 .windowFullScreenBehavior(.disabled)
         }
         .windowStyle(.titleBar)
-        .defaultSize(width: 280, height: 112)
+        .defaultSize(width: 280, height: 245)
         .defaultPosition(.center)
         .windowResizability(.contentSize)
         .windowLevel(.floating)
