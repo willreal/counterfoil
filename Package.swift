@@ -12,14 +12,17 @@ let package = Package(
             name: "CounterfoilCore",
             path: "Sources",
             exclude: [
+                "AccessibleTranscriptBodyView.swift",
                 "App.swift",
                 "CaptureManager.swift",
+                "RecordingWindow.swift",
                 "SettingsStore.swift",
+                "TranscriptNavigationViews.swift",
                 "Transcribe.swift",
                 "TranscriptStore.swift",
                 "Views.swift",
             ],
-            sources: ["RecordingModels.swift", "RecordingReliability.swift"]
+            sources: ["RecordingModels.swift", "RecordingReliability.swift", "TranscriptSearch.swift"]
         ),
         .testTarget(
             name: "CounterfoilCoreTests",

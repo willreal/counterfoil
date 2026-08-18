@@ -326,7 +326,7 @@ struct RecordingWindowView: View {
             return
         }
 
-        capture.beginNote()
+        _ = capture.beginNote()
         noteIsOpen = true
         Task { @MainActor in
             if !reduceMotion {
@@ -419,7 +419,7 @@ private struct CompactRecordingDragHandle: NSViewRepresentable {
     func updateNSView(_ nsView: DragView, context: Context) {}
 
     final class DragView: NSView {
-        override var acceptsFirstMouse: Bool { true }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
         override func hitTest(_ point: NSPoint) -> NSView? {
             self
