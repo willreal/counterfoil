@@ -21,12 +21,10 @@ struct RecordingWindowView: View {
     @FocusState private var noteIsFocused: Bool
 
     private let windowWidth: CGFloat = 280
-    private let collapsedHeight: CGFloat = 112
     private let noteHeight: CGFloat = 146
 
     var body: some View {
         VStack(spacing: 0) {
-            dragHandle
             header
             controls
             if noteIsOpen {
@@ -38,12 +36,6 @@ struct RecordingWindowView: View {
         }
         .frame(width: windowWidth)
         .background(windowBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .containerBackground(.clear, for: .window)
-        .overlay {
-            CompactRecordingWindowAccessor()
-                .allowsHitTesting(false)
-        }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: noteIsOpen)
         .onAppear {
             titleDraft = SessionNaming.editorDraft(for: capture.activeTitle)
@@ -72,13 +64,6 @@ struct RecordingWindowView: View {
         }
         .fixedSize()
         .accessibilityElement(children: .contain)
-    }
-
-    private var dragHandle: some View {
-        CompactRecordingDragHandle()
-            .frame(maxWidth: .infinity)
-            .frame(height: 12)
-            .accessibilityLabel("Move recording window")
     }
 
     private var header: some View {
@@ -411,72 +396,3 @@ struct RecordingWindowView: View {
     }
 }
 
-private struct CompactRecordingDragHandle: NSViewRepresentable {
-    func makeNSView(context: Context) -> DragView {
-        DragView()
-    }
-
-    func updateNSView(_ nsView: DragView, context: Context) {}
-
-    final class DragView: NSView {
-        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
-        override func hitTest(_ point: NSPoint) -> NSView? {
-            self
-        }
-
-        override func mouseDown(with event: NSEvent) {
-            window?.performDrag(with: event)
-        }
-    }
-}
-
-private struct CompactRecordingWindowAccessor: NSViewRepresentable {
-    func makeNSView(context: Context) -> ProbeView {
-        ProbeView()
-    }
-
-    func updateNSView(_ nsView: ProbeView, context: Context) {
-        configure(window: nsView.window)
-    }
-
-    private func configure(window: NSWindow?) {
-        guard let window else { return }
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.isMovable = true
-        window.isMovableByWindowBackground = false
-        window.hasShadow = true
-        window.styleMask.remove(.titled)
-        window.styleMask.insert(.fullSizeContentView)
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.titlebarSeparatorStyle = .none
-        window.standardWindowButton(.closeButton)?.isHidden = true
-        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        window.standardWindowButton(.zoomButton)?.isHidden = true
-
-        if let contentView = window.contentView {
-            contentView.wantsLayer = true
-            contentView.layer?.cornerRadius = 16
-            contentView.layer?.cornerCurve = .continuous
-            contentView.layer?.masksToBounds = true
-            contentView.layer?.backgroundColor = NSColor.clear.cgColor
-        }
-    }
-
-    final class ProbeView: NSView {
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            configureWindow()
-        }
-
-        private func configureWindow() {
-            guard let window else { return }
-            CompactRecordingWindowAccessor().configure(window: window)
-            window.invalidateShadow()
-        }
-    }
-}
