@@ -11,6 +11,46 @@ struct Session: Identifiable, Codable {
     let hasMicFile: Bool
     let hasTranscript: Bool
     let dayDir: String
+    let processingState: SessionProcessingState
+    let failureMessage: String?
+    let systemAudioFilename: String?
+    let microphoneAudioFilename: String?
+    let transcriptFilename: String
+    let metadataFilename: String?
+
+    init(
+        id: String,
+        stem: String,
+        title: String,
+        startTime: Date,
+        duration: TimeInterval,
+        hasSystemFile: Bool,
+        hasMicFile: Bool,
+        hasTranscript: Bool,
+        dayDir: String,
+        processingState: SessionProcessingState = .legacy,
+        failureMessage: String? = nil,
+        systemAudioFilename: String? = nil,
+        microphoneAudioFilename: String? = nil,
+        transcriptFilename: String? = nil,
+        metadataFilename: String? = nil
+    ) {
+        self.id = id
+        self.stem = stem
+        self.title = title
+        self.startTime = startTime
+        self.duration = duration
+        self.hasSystemFile = hasSystemFile
+        self.hasMicFile = hasMicFile
+        self.hasTranscript = hasTranscript
+        self.dayDir = dayDir
+        self.processingState = processingState
+        self.failureMessage = failureMessage
+        self.systemAudioFilename = systemAudioFilename
+        self.microphoneAudioFilename = microphoneAudioFilename
+        self.transcriptFilename = transcriptFilename ?? "\(stem).md"
+        self.metadataFilename = metadataFilename
+    }
 }
 
 struct OrphanInfo: Identifiable {
@@ -84,6 +124,7 @@ class TranscriptStore: ObservableObject {
     @Published var searchQuery: String = ""
     @Published var orphanSessions: [OrphanInfo] = []
     @Published var isRecovering = false
+    @Published private var searchDocuments: [String: String] = [:]
 
     private let fm = FileManager.default
     private var autoDeleteTimer: Timer?
@@ -95,11 +136,7 @@ class TranscriptStore: ObservableObject {
             if session.title.lowercased().contains(q) || session.stem.lowercased().contains(q) {
                 return true
             }
-            let mdPath = (session.dayDir as NSString).appendingPathComponent("\(session.stem).md")
-            if let content = try? String(contentsOfFile: mdPath, encoding: .utf8) {
-                return content.lowercased().contains(q)
-            }
-            return false
+            return searchDocuments[session.id]?.lowercased().contains(q) == true
         }
     }
 
@@ -114,8 +151,7 @@ class TranscriptStore: ObservableObject {
             return "Title match · \(session.stem)"
         }
 
-        let mdPath = (session.dayDir as NSString).appendingPathComponent("\(session.stem).md")
-        guard let content = try? String(contentsOfFile: mdPath, encoding: .utf8) else { return nil }
+        guard let content = searchDocuments[session.id] else { return nil }
         for rawLine in content.components(separatedBy: .newlines) {
             guard rawLine.lowercased().contains(query) else { continue }
             let line = rawLine
@@ -134,7 +170,9 @@ class TranscriptStore: ObservableObject {
         let baseDir = CaptureManager.baseDir
         var found: [Session] = []
         var knownStems = Set<String>()
+        var managedFileNames = Set<String>()
         var dirs: [URL] = []
+        var indexedDocuments: [String: String] = [:]
 
         guard let dayDirs = try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil) else {
             await MainActor.run { self.sessions = [] }
@@ -147,10 +185,64 @@ class TranscriptStore: ObservableObject {
             guard (try? dayDir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
             guard let files = try? fm.contentsOfDirectory(at: dayDir, includingPropertiesForKeys: nil) else { continue }
 
+            var metadataTranscriptStems = Set<String>()
+            let metadataFiles = files.filter { $0.pathExtension.lowercased() == "json" }
+            for metadataFile in metadataFiles {
+                guard let loadedMetadata = try? SessionMetadataIO.read(from: metadataFile),
+                      loadedMetadata.schemaVersion == SessionMetadataV1.currentSchemaVersion else { continue }
+
+                let transcriptURL = dayDir.appendingPathComponent(loadedMetadata.transcriptFilename)
+                let systemURL = loadedMetadata.systemAudioFilename.map { dayDir.appendingPathComponent($0) }
+                let microphoneURL = loadedMetadata.microphoneAudioFilename.map { dayDir.appendingPathComponent($0) }
+                let hasTranscript = fm.fileExists(atPath: transcriptURL.path)
+                let hasSystem = systemURL.map { fm.fileExists(atPath: $0.path) } ?? false
+                let hasMicrophone = microphoneURL.map { fm.fileExists(atPath: $0.path) } ?? false
+                let metadata = SessionCrashRecovery.recovered(
+                    metadata: loadedMetadata,
+                    transcriptExists: hasTranscript,
+                    audioExists: hasSystem || hasMicrophone
+                )
+                if metadata != loadedMetadata {
+                    try? SessionMetadataIO.write(metadata, to: metadataFile)
+                }
+                let id = metadata.id.uuidString.lowercased()
+
+                let session = Session(
+                    id: id,
+                    stem: metadata.stem,
+                    title: metadata.title,
+                    startTime: metadata.startTime,
+                    duration: metadata.durationSeconds,
+                    hasSystemFile: hasSystem,
+                    hasMicFile: hasMicrophone,
+                    hasTranscript: hasTranscript,
+                    dayDir: dayDir.path,
+                    processingState: metadata.processingState,
+                    failureMessage: metadata.failureMessage,
+                    systemAudioFilename: metadata.systemAudioFilename,
+                    microphoneAudioFilename: metadata.microphoneAudioFilename,
+                    transcriptFilename: metadata.transcriptFilename,
+                    metadataFilename: metadataFile.lastPathComponent
+                )
+                found.append(session)
+                knownStems.insert(metadata.stem)
+                metadataTranscriptStems.insert(metadata.stem)
+                managedFileNames.insert(metadataFile.lastPathComponent)
+                managedFileNames.insert(metadata.transcriptFilename)
+                if let filename = metadata.systemAudioFilename { managedFileNames.insert(filename) }
+                if let filename = metadata.microphoneAudioFilename { managedFileNames.insert(filename) }
+
+                if hasTranscript,
+                   let content = try? String(contentsOf: transcriptURL, encoding: .utf8) {
+                    indexedDocuments[id] = content
+                }
+            }
+
             var stems = Set<String>()
 
             for url in files {
                 let name = url.lastPathComponent
+                if managedFileNames.contains(name) { continue }
                 if name.hasPrefix("meeting_") && name.hasSuffix(".mic.m4a") {
                     stems.insert(String(name.dropLast(8)))
                 } else if name.hasPrefix("meeting_") && name.hasSuffix(".mp4") {
@@ -169,7 +261,7 @@ class TranscriptStore: ObservableObject {
                 }
             }
 
-            for stem in stems {
+            for stem in stems where !metadataTranscriptStems.contains(stem) {
                 let systemPath = dayDir.appendingPathComponent("\(stem).mp4").path
                 let systemM4aPath = dayDir.appendingPathComponent("\(stem).m4a").path
                 let micPath = dayDir.appendingPathComponent("\(stem).mic.m4a").path
@@ -206,6 +298,7 @@ class TranscriptStore: ObservableObject {
 
                 if hasMD {
                     let content = (try? String(contentsOfFile: mdPath, encoding: .utf8)) ?? ""
+                    indexedDocuments[stem] = content
                     let lines = content.components(separatedBy: "\n")
                     let firstLine = lines.first ?? ""
                     if firstLine.hasPrefix("# ") && !firstLine.hasPrefix("# Counterfoil") {
@@ -245,15 +338,21 @@ class TranscriptStore: ObservableObject {
         }
 
         let sorted = found.sorted(by: { $0.startTime > $1.startTime })
+        let finalIndexedDocuments = indexedDocuments
         await MainActor.run {
             self.sessions = sorted
+            self.searchDocuments = finalIndexedDocuments
         }
 
         // Detect orphans after building known stems
         var orphans: [OrphanInfo] = []
         for dayDir in dirs {
             guard (try? dayDir.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
-            orphans.append(contentsOf: detectOrphans(in: dayDir, knownStems: knownStems))
+            orphans.append(contentsOf: detectOrphans(
+                in: dayDir,
+                knownStems: knownStems,
+                managedFileNames: managedFileNames
+            ))
         }
 
         let finalOrphans = orphans
@@ -268,7 +367,11 @@ class TranscriptStore: ObservableObject {
 
     // MARK: Orphan detection
 
-    private func detectOrphans(in dayDir: URL, knownStems: Set<String>) -> [OrphanInfo] {
+    private func detectOrphans(
+        in dayDir: URL,
+        knownStems: Set<String>,
+        managedFileNames: Set<String>
+    ) -> [OrphanInfo] {
         var orphans: [OrphanInfo] = []
         guard let files = try? fm.contentsOfDirectory(at: dayDir, includingPropertiesForKeys: [.contentModificationDateKey]) else {
             return orphans
@@ -278,6 +381,7 @@ class TranscriptStore: ObservableObject {
 
         for file in files {
             let name = file.lastPathComponent
+            if managedFileNames.contains(name) { continue }
             let modDate = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
 
             if name.hasSuffix(".mic.m4a") {
@@ -324,7 +428,7 @@ class TranscriptStore: ObservableObject {
         if let sysFile = orphan.systemFile {
             do {
                 sysText = try await Transcriber.shared.transcribe(
-                    filePath: sysFile.path, startTime: orphan.modDate)
+                    filePath: sysFile.path, baseOffset: 0)
             } catch {
                 sysText = "[transcribe error: \(error.localizedDescription)]"
             }
@@ -333,7 +437,7 @@ class TranscriptStore: ObservableObject {
         if let micFile = orphan.micFile {
             do {
                 micText = try await Transcriber.shared.transcribe(
-                    filePath: micFile.path, startTime: orphan.modDate)
+                    filePath: micFile.path, baseOffset: 0)
             } catch {
                 micText = "[transcribe error: \(error.localizedDescription)]"
             }
@@ -374,6 +478,175 @@ class TranscriptStore: ObservableObject {
 
     // MARK: Session management
 
+    @MainActor
+    func beginProcessingSession(metadata: SessionMetadataV1, dayDir: URL) {
+        let session = session(from: metadata, dayDir: dayDir)
+        if let index = sessions.firstIndex(where: { $0.id == session.id }) {
+            sessions[index] = session
+        } else {
+            sessions.insert(session, at: 0)
+        }
+        selectedSession = session.id
+    }
+
+    @MainActor
+    func completeProcessingSession(
+        metadata: SessionMetadataV1,
+        dayDir: URL,
+        systemText: String,
+        microphoneText: String
+    ) throws {
+        let interleaved = interleaveTranscript(
+            systemText: systemText,
+            micText: microphoneText,
+            startTime: metadata.startTime,
+            duration: metadata.durationSeconds,
+            flaggedOffsets: metadata.flags,
+            notes: metadata.notes.map { ($0.timestamp, $0.text) }
+        )
+        let systemLineCount = transcriptLineCount(systemText)
+        let microphoneLineCount = transcriptLineCount(microphoneText)
+        let header = mdHeader(
+            title: metadata.title,
+            startTime: metadata.startTime,
+            duration: metadata.durationSeconds,
+            youCount: microphoneLineCount,
+            themCount: systemLineCount
+        )
+        let content = header + "\n" + interleaved
+        let transcriptURL = dayDir.appendingPathComponent(metadata.transcriptFilename)
+        try Data(content.utf8).write(to: transcriptURL, options: [.atomic])
+
+        var completedMetadata = metadata
+        completedMetadata.processingState = .ready
+        completedMetadata.failureMessage = nil
+        try persist(completedMetadata, in: dayDir)
+
+        let completedSession = session(from: completedMetadata, dayDir: dayDir)
+        replaceSession(completedSession)
+        transcriptContent[completedSession.id] = content
+        searchDocuments[completedSession.id] = content
+        refreshAnnotations(for: completedSession.id, content: content)
+        selectedSession = completedSession.id
+    }
+
+    @MainActor
+    func failProcessingSession(
+        metadata: SessionMetadataV1,
+        dayDir: URL,
+        message: String
+    ) {
+        var failedMetadata = metadata
+        failedMetadata.processingState = .failed
+        failedMetadata.failureMessage = message
+        try? persist(failedMetadata, in: dayDir)
+        let failedSession = session(from: failedMetadata, dayDir: dayDir)
+        replaceSession(failedSession)
+        selectedSession = failedSession.id
+    }
+
+    @MainActor
+    func retryTranscription(for session: Session) {
+        guard let metadataFilename = session.metadataFilename else { return }
+        let directory = URL(fileURLWithPath: session.dayDir, isDirectory: true)
+        let metadataURL = directory.appendingPathComponent(metadataFilename)
+        guard var metadata = try? SessionMetadataIO.read(from: metadataURL) else { return }
+
+        metadata.processingState = .transcribing
+        metadata.failureMessage = nil
+        metadata.selectedModel = SettingsStore.shared.selectedModel
+        try? persist(metadata, in: directory)
+        replaceSession(self.session(from: metadata, dayDir: directory))
+
+        Task {
+            do {
+                guard let systemFilename = metadata.systemAudioFilename else {
+                    throw NSError(
+                        domain: "CounterfoilTranscription",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "The system audio file is unavailable."]
+                    )
+                }
+                let systemURL = directory.appendingPathComponent(systemFilename)
+                let systemText = try await Transcriber.shared.transcribe(
+                    filePath: systemURL.path,
+                    baseOffset: 0
+                )
+                var microphoneText = ""
+                if let microphoneFilename = metadata.microphoneAudioFilename {
+                    let microphoneURL = directory.appendingPathComponent(microphoneFilename)
+                    if fm.fileExists(atPath: microphoneURL.path) {
+                        microphoneText = try await Transcriber.shared.transcribe(
+                            filePath: microphoneURL.path,
+                            baseOffset: 0
+                        )
+                    }
+                }
+                try completeProcessingSession(
+                    metadata: metadata,
+                    dayDir: directory,
+                    systemText: systemText,
+                    microphoneText: microphoneText
+                )
+            } catch {
+                failProcessingSession(
+                    metadata: metadata,
+                    dayDir: directory,
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func transcriptLineCount(_ text: String) -> Int {
+        text.components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .count
+    }
+
+    private func persist(_ metadata: SessionMetadataV1, in directory: URL) throws {
+        let metadataURL = directory.appendingPathComponent("\(metadata.stem).json")
+        try SessionMetadataIO.write(metadata, to: metadataURL)
+    }
+
+    private func session(from metadata: SessionMetadataV1, dayDir: URL) -> Session {
+        let systemExists = metadata.systemAudioFilename.map {
+            fm.fileExists(atPath: dayDir.appendingPathComponent($0).path)
+        } ?? false
+        let microphoneExists = metadata.microphoneAudioFilename.map {
+            fm.fileExists(atPath: dayDir.appendingPathComponent($0).path)
+        } ?? false
+        let transcriptExists = fm.fileExists(
+            atPath: dayDir.appendingPathComponent(metadata.transcriptFilename).path
+        )
+        return Session(
+            id: metadata.id.uuidString.lowercased(),
+            stem: metadata.stem,
+            title: metadata.title,
+            startTime: metadata.startTime,
+            duration: metadata.durationSeconds,
+            hasSystemFile: systemExists,
+            hasMicFile: microphoneExists,
+            hasTranscript: transcriptExists,
+            dayDir: dayDir.path,
+            processingState: transcriptExists ? .ready : metadata.processingState,
+            failureMessage: metadata.failureMessage,
+            systemAudioFilename: metadata.systemAudioFilename,
+            microphoneAudioFilename: metadata.microphoneAudioFilename,
+            transcriptFilename: metadata.transcriptFilename,
+            metadataFilename: "\(metadata.stem).json"
+        )
+    }
+
+    @MainActor
+    private func replaceSession(_ session: Session) {
+        if let index = sessions.firstIndex(where: { $0.id == session.id }) {
+            sessions[index] = session
+        } else {
+            sessions.insert(session, at: 0)
+        }
+    }
+
     func addSession(stem: String, title: String, dayDir: URL?, startTime: Date,
                     systemText: String, micText: String, hasMicFile: Bool, duration: TimeInterval,
                     flaggedOffsets: [TimeInterval] = [], notes: [(TimeInterval, String)] = [],
@@ -413,16 +686,26 @@ class TranscriptStore: ObservableObject {
             // the sidebar Binding setter that normally calls loadTranscript)
             if let content = try? String(contentsOf: mdPath, encoding: .utf8) {
                 self.transcriptContent[session.id] = content
+                self.searchDocuments[session.id] = content
                 self.refreshAnnotations(for: session.id, content: content)
             }
         }
     }
 
     func loadTranscript(for session: Session) {
-        let mdPath = (session.dayDir as NSString).appendingPathComponent("\(session.stem).md")
-        if let content = try? String(contentsOfFile: mdPath, encoding: .utf8) {
-            transcriptContent[session.id] = content
-            refreshAnnotations(for: session.id, content: content)
+        if transcriptContent[session.id] != nil { return }
+
+        let mdPath = (session.dayDir as NSString).appendingPathComponent(session.transcriptFilename)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self,
+                  let content = try? String(contentsOfFile: mdPath, encoding: .utf8) else { return }
+
+            DispatchQueue.main.async {
+                guard self.transcriptContent[session.id] == nil else { return }
+                self.transcriptContent[session.id] = content
+                self.searchDocuments[session.id] = content
+                self.refreshAnnotations(for: session.id, content: content)
+            }
         }
     }
 
@@ -466,20 +749,27 @@ class TranscriptStore: ObservableObject {
     }
 
     func deleteAudioFiles(_ session: Session) {
-        let sysPaths = [
-            (session.dayDir as NSString).appendingPathComponent("\(session.stem).mp4"),
-            (session.dayDir as NSString).appendingPathComponent("\(session.stem).m4a"),
-        ]
-        let micPath = (session.dayDir as NSString).appendingPathComponent("\(session.stem).mic.m4a")
+        let systemPaths: [String]
+        if let filename = session.systemAudioFilename {
+            systemPaths = [(session.dayDir as NSString).appendingPathComponent(filename)]
+        } else {
+            systemPaths = [
+                (session.dayDir as NSString).appendingPathComponent("\(session.stem).mp4"),
+                (session.dayDir as NSString).appendingPathComponent("\(session.stem).m4a"),
+            ]
+        }
+        let microphonePath = (session.dayDir as NSString).appendingPathComponent(
+            session.microphoneAudioFilename ?? "\(session.stem).mic.m4a"
+        )
 
-        for sp in sysPaths {
+        for sp in systemPaths {
             let url = URL(fileURLWithPath: sp)
             if fm.fileExists(atPath: sp) {
                 _ = try? fm.trashItem(at: url, resultingItemURL: nil)
             }
         }
-        let micURL = URL(fileURLWithPath: micPath)
-        if fm.fileExists(atPath: micPath) {
+        let micURL = URL(fileURLWithPath: microphonePath)
+        if fm.fileExists(atPath: microphonePath) {
             _ = try? fm.trashItem(at: micURL, resultingItemURL: nil)
         }
 
@@ -495,7 +785,13 @@ class TranscriptStore: ObservableObject {
                     hasSystemFile: false,
                     hasMicFile: false,
                     hasTranscript: updated.hasTranscript,
-                    dayDir: updated.dayDir
+                    dayDir: updated.dayDir,
+                    processingState: updated.processingState,
+                    failureMessage: updated.failureMessage,
+                    systemAudioFilename: updated.systemAudioFilename,
+                    microphoneAudioFilename: updated.microphoneAudioFilename,
+                    transcriptFilename: updated.transcriptFilename,
+                    metadataFilename: updated.metadataFilename
                 )
                 self.sessions[idx] = updatedSession
             }
@@ -504,10 +800,16 @@ class TranscriptStore: ObservableObject {
 
     func deleteEverything(_ session: Session) {
         deleteAudioFiles(session)
-        let mdPath = (session.dayDir as NSString).appendingPathComponent("\(session.stem).md")
+        let mdPath = (session.dayDir as NSString).appendingPathComponent(session.transcriptFilename)
         let mdURL = URL(fileURLWithPath: mdPath)
         if fm.fileExists(atPath: mdPath) {
             _ = try? fm.trashItem(at: mdURL, resultingItemURL: nil)
+        }
+        if let metadataFilename = session.metadataFilename {
+            let metadataPath = (session.dayDir as NSString).appendingPathComponent(metadataFilename)
+            if fm.fileExists(atPath: metadataPath) {
+                _ = try? fm.trashItem(at: URL(fileURLWithPath: metadataPath), resultingItemURL: nil)
+            }
         }
         DispatchQueue.main.async {
             self.sessions.removeAll(where: { $0.id == session.id })
@@ -528,7 +830,9 @@ class TranscriptStore: ObservableObject {
         let cutoff = Date().addingTimeInterval(-30 * 24 * 3600)
         for session in sessions {
             guard session.hasSystemFile || session.hasMicFile else { continue }
-            let sysPaths = [
+            let sysPaths = session.systemAudioFilename.map {
+                [(session.dayDir as NSString).appendingPathComponent($0)]
+            } ?? [
                 (session.dayDir as NSString).appendingPathComponent("\(session.stem).mp4"),
                 (session.dayDir as NSString).appendingPathComponent("\(session.stem).m4a"),
             ]
@@ -542,7 +846,9 @@ class TranscriptStore: ObservableObject {
                     break
                 }
             }
-            let micPath = (session.dayDir as NSString).appendingPathComponent("\(session.stem).mic.m4a")
+            let micPath = (session.dayDir as NSString).appendingPathComponent(
+                session.microphoneAudioFilename ?? "\(session.stem).mic.m4a"
+            )
             if !shouldDelete && fm.fileExists(atPath: micPath),
                let attrs = try? fm.attributesOfItem(atPath: micPath),
                let modDate = attrs[.modificationDate] as? Date,
@@ -588,7 +894,7 @@ class TranscriptStore: ObservableObject {
         transform: ([String], Int) -> [String]?
     ) {
         let mdURL = URL(fileURLWithPath: session.dayDir, isDirectory: true)
-            .appendingPathComponent(session.stem + ".md")
+            .appendingPathComponent(session.transcriptFilename)
         let content: String
         if let loaded = transcriptContent[session.id] {
             content = loaded
@@ -608,6 +914,7 @@ class TranscriptStore: ObservableObject {
         do {
             try data.write(to: mdURL, options: [.atomic])
             transcriptContent[session.id] = updatedContent
+            searchDocuments[session.id] = updatedContent
             refreshAnnotations(for: session.id, content: updatedContent)
         } catch {
             print("transcript rewrite error: \(error)")

@@ -174,7 +174,7 @@ final class Transcriber {
         await preloadModels()
     }
 
-    func transcribe(filePath: String, startTime: Date) async throws -> String {
+    func transcribe(filePath: String, baseOffset: TimeInterval = 0) async throws -> String {
         if !loaded { try await forceLoad() }
 
         let wavPath = NSTemporaryDirectory() + "counterfoil_\(UUID().uuidString).wav"
@@ -200,9 +200,8 @@ final class Transcriber {
             let (mel, melLen) = try preprocess(audio: chunk)
             let (enc, encLen) = try encode(mel: mel, melLength: melLen)
             let text = try decode(enc: enc, encLen: encLen)
-            let secOffset = Double(ci * 15)
-            let timestamp = startTime.addingTimeInterval(secOffset)
-            let ts = formatTimestamp(timestamp)
+            let secOffset = baseOffset + Double(ci * 15)
+            let ts = formatElapsedTimestamp(secOffset)
             if !text.isEmpty {
                 fullText += "[\(ts)] \(text)\n"
             }

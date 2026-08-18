@@ -21,7 +21,7 @@ export SWIFT_MODULECACHE_PATH="${COUNTERFOIL_MODULE_CACHE}"
 export CLANG_MODULE_CACHE_PATH="${COUNTERFOIL_MODULE_CACHE}"
 
 echo "==> Compiling app (Sources/*.swift)"
-swiftc -O -swift-version 5 \
+swiftc -O -whole-module-optimization -swift-version 5 \
     -parse-as-library \
     -target arm64-apple-macos26.0 \
     -sdk "$SDK" \
@@ -36,11 +36,12 @@ swiftc -O -swift-version 5 \
     -target arm64-apple-macos26.0 \
     -sdk "$SDK" \
     -framework AVFoundation -framework CoreML \
-    Sources/Transcribe.swift Sources/SettingsStore.swift cli/CLIMain.swift \
+    Sources/RecordingModels.swift Sources/Transcribe.swift Sources/SettingsStore.swift cli/CLIMain.swift \
     -o build/cli/counterfoil-cli
 
 echo "==> Copying Info.plist"
 cp Info.plist "${BUNDLE_DIR}/Contents/Info.plist"
+cp Assets/AppIcon.png "${BUNDLE_DIR}/Contents/Resources/AppIcon.png"
 
 echo "==> Converting AppIcon.png -> AppIcon.icns"
 ICONSET_DIR="build/AppIcon.iconset"
@@ -130,21 +131,39 @@ for expected in \
 done
 
 echo "==> Signing (stable identity if available, else ad-hoc)"
+SIGNING_DIR="$(mktemp -d /tmp/counterfoil-sign.XXXXXX)"
+SIGNED_BUNDLE="${SIGNING_DIR}/${APP_NAME}.app"
+ADHOC_REQUIREMENT='=designated => identifier "com.willchai.counterfoil"'
+cp -R "${BUNDLE_DIR}" "${SIGNING_DIR}/"
+# Sign from local storage because shared volumes can attach Finder metadata to
+# generated bundle resources.
+xattr -rc "${SIGNED_BUNDLE}" 2>/dev/null || true
 if security find-identity -p codesigning -v ~/Library/Keychains/cfoil-dev.keychain-db 2>/dev/null | grep -q "Counterfoil Dev"; then
     security unlock-keychain -p devpass ~/Library/Keychains/cfoil-dev.keychain-db > /dev/null 2>&1
-    codesign --force --sign "Counterfoil Dev" --keychain ~/Library/Keychains/cfoil-dev.keychain-db "${BUNDLE_DIR}" \
-        || codesign --force --sign - "${BUNDLE_DIR}"
+    codesign --force --sign "Counterfoil Dev" --keychain ~/Library/Keychains/cfoil-dev.keychain-db "${SIGNED_BUNDLE}" \
+        || codesign --force --sign - --identifier com.willchai.counterfoil \
+            --requirements "${ADHOC_REQUIREMENT}" "${SIGNED_BUNDLE}"
 else
-    codesign --force --sign - "${BUNDLE_DIR}"
+    codesign --force --sign - --identifier com.willchai.counterfoil \
+        --requirements "${ADHOC_REQUIREMENT}" "${SIGNED_BUNDLE}"
 fi
 
+# A running development build can keep the shared-volume executable busy.
+# Close that exact app process before replacing and reinstalling its bundle.
+pkill -x "${APP_NAME}" 2>/dev/null || true
+REPLACED_BUNDLE="build/.${APP_NAME}.replaced.app"
+if [ -e "${BUNDLE_DIR}" ]; then
+    mv "${BUNDLE_DIR}" "${REPLACED_BUNDLE}"
+fi
+ditto "${SIGNED_BUNDLE}" "${BUNDLE_DIR}"
 echo "==> Installing to /Applications"
-if cp -R "${BUNDLE_DIR}" /Applications/; then
+if ditto "${SIGNED_BUNDLE}" "/Applications/${APP_NAME}.app"; then
     INSTALL_PATH="/Applications/${APP_NAME}.app"
 else
     echo "==> /Applications is not writable; leaving the verified app at ${BUNDLE_DIR}"
     INSTALL_PATH="${BUNDLE_DIR}"
 fi
+rm -rf "${SIGNING_DIR}"
 
 touch "${INSTALL_PATH}"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"

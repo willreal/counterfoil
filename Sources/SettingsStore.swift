@@ -10,20 +10,24 @@ struct VocabularyPair: Identifiable, Codable, Equatable {
 class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
 
+    @Published private(set) var availableModels: [String]
+
     @Published var vocabularyPairs: [VocabularyPair] {
         didSet { saveVocabulary() }
     }
 
     @Published var autoDeleteEnabled: Bool {
-        didSet { UserDefaults.standard.set(autoDeleteEnabled, forKey: "autoDeleteAudio") }
+        didSet {
+            UserDefaults.standard.set(autoDeleteEnabled, forKey: "autoDeleteAudio")
+            hasChosenAudioRetention = true
+            UserDefaults.standard.set(true, forKey: "hasChosenAudioRetention")
+        }
     }
+
+    @Published private(set) var hasChosenAudioRetention: Bool
 
     @Published var selectedModel: String {
         didSet { UserDefaults.standard.set(selectedModel, forKey: "selectedModel") }
-    }
-
-    var availableModels: [String] {
-        Transcriber.scanAvailableModels()
     }
 
     var hasAnyModels: Bool {
@@ -35,9 +39,23 @@ class SettingsStore: ObservableObject {
     }
 
     private init() {
-        self.autoDeleteEnabled = UserDefaults.standard.object(forKey: "autoDeleteAudio") as? Bool ?? true
+        let storedRetention = UserDefaults.standard.object(forKey: "autoDeleteAudio") as? Bool
+        self.availableModels = Transcriber.scanAvailableModels()
+        self.autoDeleteEnabled = storedRetention ?? false
+        self.hasChosenAudioRetention = storedRetention != nil
+            || UserDefaults.standard.bool(forKey: "hasChosenAudioRetention")
         self.selectedModel = UserDefaults.standard.string(forKey: "selectedModel") ?? "Parakeet V2"
         self.vocabularyPairs = Self.loadVocabulary()
+    }
+
+    func chooseAudioRetention(autoDelete: Bool) {
+        autoDeleteEnabled = autoDelete
+        hasChosenAudioRetention = true
+        UserDefaults.standard.set(true, forKey: "hasChosenAudioRetention")
+    }
+
+    func refreshAvailableModels() {
+        availableModels = Transcriber.scanAvailableModels()
     }
 
     private func saveVocabulary() {

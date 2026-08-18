@@ -17,6 +17,8 @@ struct CounterfoilApp: App {
         WindowGroup {
             ContentView(store: store, capture: capture)
                 .frame(minWidth: 980, minHeight: 520)
+                .tint(Color(nsColor: .systemRed))
+                .accentColor(Color(nsColor: .systemRed))
                 .task {
                     await store.loadSessions()
                 }
@@ -33,24 +35,49 @@ struct CounterfoilApp: App {
                 }
                 .keyboardShortcut("f", modifiers: .command)
             }
+            CommandGroup(after: .appInfo) {
+                Button("Settings…") {
+                    NotificationCenter.default.post(name: NSNotification.Name("CounterfoilOpenSettings"), object: nil)
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
         }
 
-        Window("Recording", id: RecordingPanelView.windowID) {
-            RecordingPanelView(capture: capture, store: store)
-                .background(RecordingWindowConfigurator())
+        Window("Recording", id: RecordingWindowView.windowID) {
+            RecordingWindowView(capture: capture, store: store)
+                .tint(Color(nsColor: .systemRed))
+                .accentColor(Color(nsColor: .systemRed))
+                .containerBackground(.clear, for: .window)
+        .windowResizeAnchor(.top)
+                .windowDismissBehavior(capture.phase.presentsRecordingPanel ? .disabled : .enabled)
+                .windowMinimizeBehavior(.disabled)
+                .windowResizeBehavior(.disabled)
+                .windowFullScreenBehavior(.disabled)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 316, height: 340)
+        .defaultSize(width: 280, height: 112)
+        .defaultPosition(.center)
         .windowResizability(.contentSize)
+        .windowLevel(.floating)
+        .windowManagerRole(.associated)
+        .commandsRemoved()
 
         Window("Welcome to Counterfoil", id: OnboardingView.windowID) {
             OnboardingView()
+                .accentColor(Color(nsColor: .systemRed))
+                .windowDismissBehavior(.disabled)
         }
-        .defaultSize(width: 480, height: 360)
+        .windowStyle(.titleBar)
+        .defaultSize(width: 520, height: 460)
         .windowResizability(.contentSize)
 
-        Settings {
+        Window("Counterfoil Settings", id: SettingsView.windowID) {
             SettingsView()
+                .tint(Color(nsColor: .systemRed))
+                .accentColor(Color(nsColor: .systemRed))
         }
+        .windowStyle(.titleBar)
+        .defaultSize(width: 510, height: 420)
+        .windowResizability(.contentSize)
     }
 }
