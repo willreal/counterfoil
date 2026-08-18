@@ -775,6 +775,7 @@ final class CaptureManager: ObservableObject {
             resetCaptureResourcesForProcessing()
 
             do {
+                defer { Transcriber.shared.releaseModels() }
                 let systemText = try await Transcriber.shared.transcribe(
                     filePath: finalSystemURL.path,
                     baseOffset: 0

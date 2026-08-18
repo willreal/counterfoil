@@ -257,9 +257,7 @@ struct ContentView: View {
             sidebar
                 .navigationSplitViewColumnWidth(250)
         } detail: {
-            PlayerObservedContent(player: player) {
-                detailPane
-            }
+            detailPane
         }
         .navigationSplitViewStyle(.balanced)
         .searchable(
@@ -677,10 +675,12 @@ struct ContentView: View {
                 .padding(.bottom, 18)
             }
 
-            if player.hasAudio {
-                readingColumn {
-                    transportBar(session: session)
-                        .padding(.bottom, 14)
+            PlayerObservedContent(player: player) {
+                if player.hasAudio {
+                    readingColumn {
+                        transportBar(session: session)
+                            .padding(.bottom, 14)
+                    }
                 }
             }
 
@@ -1217,7 +1217,6 @@ struct ModelsSettingsView: View {
                     }
                     .onChange(of: selectedModel) { _, model in
                         settings.selectedModel = model
-                        Task { await Transcriber.shared.preloadModels() }
                     }
                 }
             } header: {
@@ -1310,7 +1309,6 @@ struct ModelsSettingsView: View {
                     v2Completed = true
                     v2Progress = 1
                     settings.refreshAvailableModels()
-                    Task { await Transcriber.shared.preloadModels() }
                 case .failure(let error):
                     v2Error = error.localizedDescription
                 }
@@ -1332,7 +1330,6 @@ struct ModelsSettingsView: View {
                     v3Completed = true
                     v3Progress = 1
                     settings.refreshAvailableModels()
-                    Task { await Transcriber.shared.preloadModels() }
                 case .failure(let error):
                     v3Error = error.localizedDescription
                 }
@@ -1348,17 +1345,20 @@ struct ModelsSettingsView: View {
                 }
 
                 let archivePath = FileManager.default.temporaryDirectory.appendingPathComponent("\(label)-\(UUID().uuidString).tar.gz")
-                let (bytes, response) = try await withProgressDownload(url: url, progress: progress)
-                try bytes.write(to: archivePath)
+                let (downloadedURL, response) = try await withProgressDownload(url: url, progress: progress)
 
                 guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
+                    try? FileManager.default.removeItem(at: downloadedURL)
                     throw NSError(domain: "download", code: 2, userInfo: [NSLocalizedDescriptionKey: "Download failed with HTTP error"])
                 }
+
+                try? FileManager.default.removeItem(at: archivePath)
+                try FileManager.default.moveItem(at: downloadedURL, to: archivePath)
+                defer { try? FileManager.default.removeItem(at: archivePath) }
 
                 let modelsDirectory = Transcriber.modelsDir
                 try FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
                 let extracted = try await extractTarGz(at: archivePath, to: modelsDirectory)
-                try? FileManager.default.removeItem(at: archivePath)
                 guard let extracted else {
                     throw NSError(domain: "download", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to extract archive"])
                 }
@@ -1375,40 +1375,45 @@ struct ModelsSettingsView: View {
         }
     }
 
-    private func withProgressDownload(url: URL, progress: @escaping (Double) -> Void) async throws -> (Data, URLResponse) {
+    private func withProgressDownload(url: URL, progress: @escaping (Double) -> Void) async throws -> (URL, URLResponse) {
         var request = URLRequest(url: url)
         request.timeoutInterval = 3600
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (temporaryURL, response) = try await URLSession.shared.download(for: request)
         progress(1)
-        return (data, response)
+        return (temporaryURL, response)
     }
 
     private func extractTarGz(at archivePath: URL, to destination: URL) async throws -> URL? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        process.arguments = ["-xzf", archivePath.path, "-C", destination.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
+        try await Task.detached(priority: .utility) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+            process.arguments = ["-xzf", archivePath.path, "-C", destination.path]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
 
-        let fileManager = FileManager.default
-        let contents = try? fileManager.contentsOfDirectory(at: destination, includingPropertiesForKeys: [.contentModificationDateKey])
-        let sorted = (contents ?? []).sorted {
-            let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
-            let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
-            return left > right
-        }
-        for item in sorted {
-            var isDirectory: ObjCBool = false
-            if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory),
-               isDirectory.boolValue,
-               fileManager.fileExists(atPath: item.appendingPathComponent("Preprocessor.mlmodelc").path) {
-                return item
+            let fileManager = FileManager.default
+            let contents = try? fileManager.contentsOfDirectory(
+                at: destination,
+                includingPropertiesForKeys: [.contentModificationDateKey]
+            )
+            let sorted = (contents ?? []).sorted {
+                let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
+                let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
+                return left > right
             }
-        }
-        return destination
+            for item in sorted {
+                var isDirectory: ObjCBool = false
+                if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory),
+                   isDirectory.boolValue,
+                   fileManager.fileExists(atPath: item.appendingPathComponent("Preprocessor.mlmodelc").path) {
+                    return item
+                }
+            }
+            return destination
+        }.value
     }
 }
 

@@ -125,11 +125,12 @@ class TranscriptStore: ObservableObject {
     @Published var searchScope: TranscriptSearchScope = .all
     @Published var orphanSessions: [OrphanInfo] = []
     @Published var isRecovering = false
-    @Published private var searchDocuments: [String: String] = [:]
     @Published private var searchIndexes: [String: TranscriptSearchIndex] = [:]
 
     private let fm = FileManager.default
     private var autoDeleteTimer: Timer?
+    private let transcriptCacheLimit = 3
+    private var transcriptAccessOrder: [String] = []
 
     var displayedSessions: [Session] {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -139,7 +140,7 @@ class TranscriptStore: ObservableObject {
                session.title.localizedCaseInsensitiveContains(query) || session.stem.localizedCaseInsensitiveContains(query) {
                 return true
             }
-            return searchIndexes[session.id]?.text(for: searchScope).localizedCaseInsensitiveContains(query) == true
+            return searchIndexes[session.id]?.matches(query, scope: searchScope) == true
         }
     }
 
@@ -153,8 +154,8 @@ class TranscriptStore: ObservableObject {
            session.title.localizedCaseInsensitiveContains(query) || session.stem.localizedCaseInsensitiveContains(query) {
             return "Title match · \(session.stem)"
         }
-        guard let content = searchDocuments[session.id] else { return nil }
-        return TranscriptSearchSupport.context(in: content, query: query, scope: searchScope)
+        guard let index = searchIndexes[session.id] else { return nil }
+        return TranscriptSearchSupport.context(in: index, query: query, scope: searchScope)
     }
 
     func loadSessions() async {
@@ -163,10 +164,16 @@ class TranscriptStore: ObservableObject {
         var knownStems = Set<String>()
         var managedFileNames = Set<String>()
         var dirs: [URL] = []
-        var indexedDocuments: [String: String] = [:]
+        var indexedSearchIndexes: [String: TranscriptSearchIndex] = [:]
 
         guard let dayDirs = try? fm.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil) else {
-            await MainActor.run { self.sessions = [] }
+            await MainActor.run {
+                self.sessions = []
+                self.transcriptContent.removeAll(keepingCapacity: false)
+                self.sessionAnnotations.removeAll(keepingCapacity: false)
+                self.searchIndexes.removeAll(keepingCapacity: false)
+                self.transcriptAccessOrder.removeAll(keepingCapacity: false)
+            }
             return
         }
 
@@ -225,7 +232,7 @@ class TranscriptStore: ObservableObject {
 
                 if hasTranscript,
                    let content = try? String(contentsOf: transcriptURL, encoding: .utf8) {
-                    indexedDocuments[id] = content
+                    indexedSearchIndexes[id] = TranscriptSearchSupport.makeIndex(from: content)
                 }
             }
 
@@ -289,7 +296,7 @@ class TranscriptStore: ObservableObject {
 
                 if hasMD {
                     let content = (try? String(contentsOfFile: mdPath, encoding: .utf8)) ?? ""
-                    indexedDocuments[stem] = content
+                    indexedSearchIndexes[stem] = TranscriptSearchSupport.makeIndex(from: content)
                     let lines = content.components(separatedBy: "\n")
                     let firstLine = lines.first ?? ""
                     if firstLine.hasPrefix("# ") && !firstLine.hasPrefix("# Counterfoil") {
@@ -329,12 +336,13 @@ class TranscriptStore: ObservableObject {
         }
 
         let sorted = found.sorted(by: { $0.startTime > $1.startTime })
-        let finalIndexedDocuments = indexedDocuments
-        let finalSearchIndexes = indexedDocuments.mapValues { TranscriptSearchSupport.makeIndex(from: $0) }
+        let finalSearchIndexes = indexedSearchIndexes
         await MainActor.run {
             self.sessions = sorted
-            self.searchDocuments = finalIndexedDocuments
             self.searchIndexes = finalSearchIndexes
+            self.transcriptContent.removeAll(keepingCapacity: false)
+            self.sessionAnnotations.removeAll(keepingCapacity: false)
+            self.transcriptAccessOrder.removeAll(keepingCapacity: false)
         }
 
         // Detect orphans after building known stems
@@ -414,6 +422,7 @@ class TranscriptStore: ObservableObject {
 
     func recoverOrphan(_ orphan: OrphanInfo) async {
         await MainActor.run { self.isRecovering = true }
+        defer { Transcriber.shared.releaseModels() }
 
         var sysText = ""
         var micText = ""
@@ -517,10 +526,7 @@ class TranscriptStore: ObservableObject {
 
         let completedSession = session(from: completedMetadata, dayDir: dayDir)
         replaceSession(completedSession)
-        transcriptContent[completedSession.id] = content
-        searchDocuments[completedSession.id] = content
-        searchIndexes[completedSession.id] = TranscriptSearchSupport.makeIndex(from: content)
-        refreshAnnotations(for: completedSession.id, content: content)
+        cacheTranscriptContent(content, for: completedSession.id)
         selectedSession = completedSession.id
     }
 
@@ -553,6 +559,7 @@ class TranscriptStore: ObservableObject {
         replaceSession(self.session(from: metadata, dayDir: directory))
 
         Task {
+            defer { Transcriber.shared.releaseModels() }
             do {
                 guard let systemFilename = metadata.systemAudioFilename else {
                     throw NSError(
@@ -679,16 +686,16 @@ class TranscriptStore: ObservableObject {
             // sit on "Loading..." (selection set programmatically bypasses
             // the sidebar Binding setter that normally calls loadTranscript)
             if let content = try? String(contentsOf: mdPath, encoding: .utf8) {
-                self.transcriptContent[session.id] = content
-                self.searchDocuments[session.id] = content
-                self.searchIndexes[session.id] = TranscriptSearchSupport.makeIndex(from: content)
-                self.refreshAnnotations(for: session.id, content: content)
+                self.cacheTranscriptContent(content, for: session.id)
             }
         }
     }
 
     func loadTranscript(for session: Session) {
-        if transcriptContent[session.id] != nil { return }
+        if transcriptContent[session.id] != nil {
+            touchTranscriptCache(session.id)
+            return
+        }
 
         let mdPath = (session.dayDir as NSString).appendingPathComponent(session.transcriptFilename)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -696,11 +703,11 @@ class TranscriptStore: ObservableObject {
                   let content = try? String(contentsOfFile: mdPath, encoding: .utf8) else { return }
 
             DispatchQueue.main.async {
-                guard self.transcriptContent[session.id] == nil else { return }
-                self.transcriptContent[session.id] = content
-                self.searchDocuments[session.id] = content
-                self.searchIndexes[session.id] = TranscriptSearchSupport.makeIndex(from: content)
-                self.refreshAnnotations(for: session.id, content: content)
+                guard self.transcriptContent[session.id] == nil else {
+                    self.touchTranscriptCache(session.id)
+                    return
+                }
+                self.cacheTranscriptContent(content, for: session.id)
             }
         }
     }
@@ -810,9 +817,9 @@ class TranscriptStore: ObservableObject {
         DispatchQueue.main.async {
             self.sessions.removeAll(where: { $0.id == session.id })
             self.transcriptContent.removeValue(forKey: session.id)
-            self.searchDocuments.removeValue(forKey: session.id)
             self.searchIndexes.removeValue(forKey: session.id)
             self.sessionAnnotations.removeValue(forKey: session.id)
+            self.transcriptAccessOrder.removeAll(where: { $0 == session.id })
             if self.selectedSession == session.id {
                 self.selectedSession = nil
             }
@@ -868,6 +875,32 @@ class TranscriptStore: ObservableObject {
         }
     }
 
+    private func cacheTranscriptContent(_ content: String, for sessionID: String) {
+        transcriptContent[sessionID] = content
+        searchIndexes[sessionID] = TranscriptSearchSupport.makeIndex(from: content)
+        refreshAnnotations(for: sessionID, content: content)
+        transcriptAccessOrder.removeAll(where: { $0 == sessionID })
+        transcriptAccessOrder.append(sessionID)
+        trimTranscriptCache()
+    }
+
+    private func touchTranscriptCache(_ sessionID: String) {
+        transcriptAccessOrder.removeAll(where: { $0 == sessionID })
+        transcriptAccessOrder.append(sessionID)
+        trimTranscriptCache()
+    }
+
+    private func trimTranscriptCache() {
+        while transcriptAccessOrder.count > transcriptCacheLimit {
+            guard let removalIndex = transcriptAccessOrder.firstIndex(where: { $0 != selectedSession }) else {
+                break
+            }
+            let sessionID = transcriptAccessOrder.remove(at: removalIndex)
+            transcriptContent.removeValue(forKey: sessionID)
+            sessionAnnotations.removeValue(forKey: sessionID)
+        }
+    }
+
     private func refreshAnnotations(for sessionID: String, content: String) {
         var annotations = TranscriptAnnotations()
         for (lineIndex, rawLine) in content.components(separatedBy: "\n").enumerated() {
@@ -911,10 +944,7 @@ class TranscriptStore: ObservableObject {
         guard let data = updatedContent.data(using: .utf8) else { return }
         do {
             try data.write(to: mdURL, options: [.atomic])
-            transcriptContent[session.id] = updatedContent
-            searchDocuments[session.id] = updatedContent
-            searchIndexes[session.id] = TranscriptSearchSupport.makeIndex(from: updatedContent)
-            refreshAnnotations(for: session.id, content: updatedContent)
+            cacheTranscriptContent(updatedContent, for: session.id)
         } catch {
             print("transcript rewrite error: \(error)")
         }

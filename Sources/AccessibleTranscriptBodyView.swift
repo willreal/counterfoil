@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 private enum AccessibleTranscriptEventKind: Equatable {
     case meeting
@@ -21,31 +22,84 @@ private struct AccessibleTranscriptEvent: Identifiable, Equatable {
     var isAnnotation: Bool { isNote || isFlag }
 }
 
+private struct AccessibleTranscriptEventSnapshot {
+    let events: [AccessibleTranscriptEvent]
+    let byID: [Int: AccessibleTranscriptEvent]
+    let timedEvents: [AccessibleTranscriptEvent]
+    let speechEvents: [AccessibleTranscriptEvent]
+    let annotations: [AccessibleTranscriptEvent]
+    let timedAnnotations: [AccessibleTranscriptEvent]
+    let overviewMarks: [TranscriptOverviewMark]
+    let lastTimestamp: TimeInterval
+
+    static let empty = AccessibleTranscriptEventSnapshot(
+        events: [],
+        byID: [:],
+        timedEvents: [],
+        speechEvents: [],
+        annotations: [],
+        timedAnnotations: [],
+        overviewMarks: [],
+        lastTimestamp: 0
+    )
+}
+
 private final class AccessibleTranscriptEventCache {
     private var source: String?
-    private var cachedEvents: [AccessibleTranscriptEvent] = []
+    private var cachedSnapshot = AccessibleTranscriptEventSnapshot.empty
 
-    func events(
+    func snapshot(
         for source: String,
         parse: () -> [AccessibleTranscriptEvent]
-    ) -> [AccessibleTranscriptEvent] {
+    ) -> AccessibleTranscriptEventSnapshot {
         if self.source == source {
-            return cachedEvents
+            return cachedSnapshot
         }
-        let parsed = parse()
+
+        let events = parse()
+        let byID = Dictionary(uniqueKeysWithValues: events.map { ($0.id, $0) })
+        let timedEvents = events
+            .filter { $0.timestamp != nil }
+            .sorted { ($0.timestamp ?? 0) < ($1.timestamp ?? 0) }
+        let speechEvents = timedEvents.filter(\.isSpeech)
+        let annotations = events.filter(\.isAnnotation)
+        let timedAnnotations = timedEvents.filter(\.isAnnotation)
+        let overviewMarks = timedEvents.map { event in
+            let kind: TranscriptOverviewMarkKind
+            switch event.kind {
+            case .meeting, .you: kind = .speech
+            case .note: kind = .note
+            case .flag: kind = .flag
+            }
+            return TranscriptOverviewMark(id: event.id, timestamp: event.timestamp ?? 0, kind: kind)
+        }
+        let snapshot = AccessibleTranscriptEventSnapshot(
+            events: events,
+            byID: byID,
+            timedEvents: timedEvents,
+            speechEvents: speechEvents,
+            annotations: annotations,
+            timedAnnotations: timedAnnotations,
+            overviewMarks: overviewMarks,
+            lastTimestamp: timedEvents.last?.timestamp ?? 0
+        )
         self.source = source
-        cachedEvents = parsed
-        return parsed
+        cachedSnapshot = snapshot
+        return snapshot
     }
 }
 
 struct AccessibleTranscriptBodyView: View {
     let session: Session
     @ObservedObject var store: TranscriptStore
-    @ObservedObject var player: TranscriptPlayer
+    let player: TranscriptPlayer
     let reduceMotion: Bool
 
     @State private var eventCache = AccessibleTranscriptEventCache()
+    @State private var playbackTime: TimeInterval = 0
+    @State private var playbackDuration: TimeInterval = 0
+    @State private var playbackIsPlaying = false
+    @State private var playbackHasAudio = false
     @State private var collapsedNoteIDs: Set<Int> = []
     @State private var editingNoteID: Int?
     @State private var noteEditText = ""
@@ -60,11 +114,14 @@ struct AccessibleTranscriptBodyView: View {
         store.transcriptContent[session.id] ?? ""
     }
 
-    private var events: [AccessibleTranscriptEvent] {
-        eventCache.events(for: source) {
+    private var snapshot: AccessibleTranscriptEventSnapshot {
+        eventCache.snapshot(for: source) {
             Self.parse(source)
         }
     }
+
+    private var events: [AccessibleTranscriptEvent] { snapshot.events }
+    private var annotations: [AccessibleTranscriptEvent] { snapshot.annotations }
 
     private var query: String {
         store.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -75,25 +132,20 @@ struct AccessibleTranscriptBodyView: View {
         return events.filter(matchesSearch)
     }
 
-    private var annotations: [AccessibleTranscriptEvent] {
-        events.filter(\.isAnnotation)
-    }
-
     private var timelineDuration: TimeInterval {
-        let lastTimestamp = events.compactMap(\.timestamp).max() ?? 0
-        return max(max(0.1, session.duration), max(player.duration, lastTimestamp + 1))
+        max(max(0.1, session.duration), max(playbackDuration, snapshot.lastTimestamp + 1))
     }
 
     private var activeEventID: Int? {
-        guard player.isPlaying else { return nil }
-        return activeSpeechEvent(at: player.currentTime)?.id
+        guard playbackIsPlaying else { return nil }
+        return activeSpeechEvent(at: playbackTime)?.id
     }
 
     private var displayedPosition: TimeInterval {
-        if player.isPlaying && followPlayback {
-            return player.currentTime
+        if playbackIsPlaying && followPlayback {
+            return playbackTime
         }
-        return transcriptPositionTime ?? player.currentTime
+        return transcriptPositionTime ?? playbackTime
     }
 
     var body: some View {
@@ -126,8 +178,10 @@ struct AccessibleTranscriptBodyView: View {
                     }
                 }
                 .onScrollTargetVisibilityChange(idType: Int.self, threshold: 0.2) { ids in
-                    guard let visible = ids.compactMap({ id in events.first(where: { $0.id == id }) })
-                        .first(where: { $0.timestamp != nil }),
+                    guard let visible = ids
+                        .compactMap({ snapshot.byID[$0] })
+                        .filter({ $0.timestamp != nil })
+                        .min(by: { $0.lineIndex < $1.lineIndex }),
                           let timestamp = visible.timestamp else { return }
                     transcriptPositionTime = timestamp
                 }
@@ -153,9 +207,9 @@ struct AccessibleTranscriptBodyView: View {
                 }
             }
             .onChange(of: activeEventID) { _, id in
-                guard followPlayback, player.isPlaying,
+                guard followPlayback, playbackIsPlaying,
                       let id,
-                      let event = events.first(where: { $0.id == id }) else { return }
+                      let event = snapshot.byID[id] else { return }
                 jump(to: event, proxy: proxy, preserveFollow: true)
             }
             .onChange(of: store.searchQuery) { _, newValue in
@@ -175,6 +229,25 @@ struct AccessibleTranscriptBodyView: View {
                 collapsedNoteIDs.removeAll()
                 searchCursor = 0
             }
+            .onAppear {
+                playbackTime = player.currentTime
+                playbackDuration = player.duration
+                playbackIsPlaying = player.isPlaying
+                playbackHasAudio = player.hasAudio
+            }
+            .onReceive(
+                player.$currentTime.throttle(
+                    for: .seconds(1),
+                    scheduler: RunLoop.main,
+                    latest: true
+                )
+            ) { playbackTime = $0 }
+            .onReceive(player.$duration.removeDuplicates()) { playbackDuration = $0 }
+            .onReceive(player.$isPlaying.removeDuplicates()) { isPlaying in
+                playbackIsPlaying = isPlaying
+                if !isPlaying { playbackTime = player.currentTime }
+            }
+            .onReceive(player.$hasAudio.removeDuplicates()) { playbackHasAudio = $0 }
         }
     }
 
@@ -182,18 +255,7 @@ struct AccessibleTranscriptBodyView: View {
         events.count >= 18 || !annotations.isEmpty || !query.isEmpty
     }
 
-    private var overviewMarks: [TranscriptOverviewMark] {
-        events.compactMap { event in
-            guard let timestamp = event.timestamp else { return nil }
-            let kind: TranscriptOverviewMarkKind
-            switch event.kind {
-            case .meeting, .you: kind = .speech
-            case .note: kind = .note
-            case .flag: kind = .flag
-            }
-            return TranscriptOverviewMark(id: event.id, timestamp: timestamp, kind: kind)
-        }
-    }
+    private var overviewMarks: [TranscriptOverviewMark] { snapshot.overviewMarks }
 
     private var emptyState: some View {
         VStack(spacing: 10) {
@@ -465,10 +527,10 @@ struct AccessibleTranscriptBodyView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
 
-            if player.hasAudio {
+            if playbackHasAudio {
                 Button {
                     followPlayback.toggle()
-                    if followPlayback, let active = activeSpeechEvent(at: player.currentTime) {
+                    if followPlayback, let active = activeSpeechEvent(at: playbackTime) {
                         jump(to: active, proxy: proxy, preserveFollow: true)
                     }
                 } label: {
@@ -528,18 +590,48 @@ struct AccessibleTranscriptBodyView: View {
     private func play(_ event: AccessibleTranscriptEvent) {
         guard let timestamp = event.timestamp, player.hasAudio else { return }
         followPlayback = true
+        playbackTime = timestamp
+        playbackIsPlaying = true
         player.play(from: timestamp)
     }
 
     private func activeSpeechEvent(at time: TimeInterval) -> AccessibleTranscriptEvent? {
-        events.filter { $0.isSpeech && ($0.timestamp ?? .greatestFiniteMagnitude) <= time + 0.05 }
-            .last
+        let speech = snapshot.speechEvents
+        guard !speech.isEmpty else { return nil }
+        let target = time + 0.05
+        var low = 0
+        var high = speech.count
+        while low < high {
+            let mid = (low + high) / 2
+            if (speech[mid].timestamp ?? 0) <= target {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        return low > 0 ? speech[low - 1] : nil
     }
 
     private func nearestEvent(to time: TimeInterval) -> AccessibleTranscriptEvent? {
-        events.filter { $0.timestamp != nil }.min { lhs, rhs in
-            abs((lhs.timestamp ?? 0) - time) < abs((rhs.timestamp ?? 0) - time)
+        let timed = snapshot.timedEvents
+        guard !timed.isEmpty else { return nil }
+        var low = 0
+        var high = timed.count
+        while low < high {
+            let mid = (low + high) / 2
+            if (timed[mid].timestamp ?? 0) < time {
+                low = mid + 1
+            } else {
+                high = mid
+            }
         }
+        if low == 0 { return timed[0] }
+        if low == timed.count { return timed[timed.count - 1] }
+        let before = timed[low - 1]
+        let after = timed[low]
+        return abs((before.timestamp ?? 0) - time) <= abs((after.timestamp ?? 0) - time)
+            ? before
+            : after
     }
 
     private func jump(to event: AccessibleTranscriptEvent, proxy: ScrollViewProxy, preserveFollow: Bool = false) {
@@ -570,17 +662,14 @@ struct AccessibleTranscriptBodyView: View {
     }
 
     private func moveAnnotation(_ direction: Int, proxy: ScrollViewProxy) {
-        let timed = annotations.compactMap { event -> (AccessibleTranscriptEvent, TimeInterval)? in
-            guard let timestamp = event.timestamp else { return nil }
-            return (event, timestamp)
-        }.sorted { $0.1 < $1.1 }
+        let timed = snapshot.timedAnnotations
         guard !timed.isEmpty else { return }
-        let position = transcriptPositionTime ?? player.currentTime
+        let position = transcriptPositionTime ?? playbackTime
         let target: AccessibleTranscriptEvent
         if direction > 0 {
-            target = timed.first(where: { $0.1 > position + 0.05 })?.0 ?? timed[0].0
+            target = timed.first(where: { ($0.timestamp ?? 0) > position + 0.05 }) ?? timed[0]
         } else {
-            target = timed.last(where: { $0.1 < position - 0.05 })?.0 ?? timed[timed.count - 1].0
+            target = timed.last(where: { ($0.timestamp ?? 0) < position - 0.05 }) ?? timed[timed.count - 1]
         }
         jump(to: target, proxy: proxy)
     }
