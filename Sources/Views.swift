@@ -429,7 +429,6 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(.bar)
     }
 
     private var sidebarFooter: some View {
