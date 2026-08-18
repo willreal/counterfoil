@@ -125,13 +125,16 @@ final class Transcriber {
     func preloadModels() async {
         let targetName = SettingsStore.shared.selectedModel
         if loaded && loadedModelName == targetName { return }
-        loaded = false
+        releaseModels()
         loadedModelName = targetName
         let dir = self.modelDir
 
         copyFromSourceIfNeeded()
 
-        guard modelsAvailable else { return }
+        guard modelsAvailable else {
+            loadedModelName = ""
+            return
+        }
 
         do {
             preprocessor = try MLModel(contentsOf: dir.appendingPathComponent("Preprocessor.mlmodelc"))
@@ -139,14 +142,27 @@ final class Transcriber {
             decoder = try MLModel(contentsOf: dir.appendingPathComponent("Decoder.mlmodelc"))
             joint = try MLModel(contentsOf: dir.appendingPathComponent("JointDecision.mlmodelc"))
 
-            guard let vp = Self.vocabPath(for: dir) else { return }
+            guard let vp = Self.vocabPath(for: dir) else {
+                releaseModels()
+                return
+            }
             let vocabData = try Data(contentsOf: URL(fileURLWithPath: vp))
             vocab = try JSONSerialization.jsonObject(with: vocabData) as! [String: String]
             loaded = true
         } catch {
             print("model preload error: \(error)")
-            loaded = false
+            releaseModels()
         }
+    }
+
+    func releaseModels() {
+        preprocessor = nil
+        encoder = nil
+        decoder = nil
+        joint = nil
+        vocab.removeAll(keepingCapacity: false)
+        loaded = false
+        loadedModelName = ""
     }
 
     private func copyFromSourceIfNeeded() {
@@ -175,41 +191,118 @@ final class Transcriber {
     }
 
     func transcribe(filePath: String, baseOffset: TimeInterval = 0) async throws -> String {
-        if !loaded { try await forceLoad() }
-
-        let wavPath = NSTemporaryDirectory() + "counterfoil_\(UUID().uuidString).wav"
-        try await convertTo16kMono(src: filePath, dst: wavPath)
-        defer { try? FileManager.default.removeItem(atPath: wavPath) }
-
-        let audio = try readWavSamples(wavPath)
-        let chunkSamples = 16000 * 15
-        var chunks: [[Int16]] = []
-        var i = 0
-        while i < audio.count {
-            let end = min(i + chunkSamples, audio.count)
-            var chunk = Array(audio[i..<end])
-            if chunk.count < chunkSamples {
-                chunk.append(contentsOf: [Int16](repeating: 0, count: chunkSamples - chunk.count))
-            }
-            chunks.append(chunk)
-            i += chunkSamples
+        let selectedModel = SettingsStore.shared.selectedModel
+        if !loaded || loadedModelName != selectedModel {
+            try await forceLoad()
         }
 
-        var fullText = ""
-        for (ci, chunk) in chunks.enumerated() {
-            let (mel, melLen) = try preprocess(audio: chunk)
-            let (enc, encLen) = try encode(mel: mel, melLength: melLen)
-            let text = try decode(enc: enc, encLen: encLen)
-            let secOffset = baseOffset + Double(ci * 15)
-            let ts = formatElapsedTimestamp(secOffset)
-            if !text.isEmpty {
-                fullText += "[\(ts)] \(text)\n"
+        let url = URL(fileURLWithPath: filePath)
+        let asset = AVURLAsset(url: url)
+        let tracks = try await asset.loadTracks(withMediaType: .audio)
+        guard let track = tracks.first else {
+            throw NSError(
+                domain: "transcribe",
+                code: 6,
+                userInfo: [NSLocalizedDescriptionKey: "No audio track"]
+            )
+        }
+
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 16_000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ])
+        guard reader.canAdd(output) else {
+            throw NSError(
+                domain: "transcribe",
+                code: 7,
+                userInfo: [NSLocalizedDescriptionKey: "Audio conversion could not be configured"]
+            )
+        }
+        reader.add(output)
+        guard reader.startReading() else {
+            throw reader.error ?? NSError(
+                domain: "transcribe",
+                code: 8,
+                userInfo: [NSLocalizedDescriptionKey: "Audio reading could not start"]
+            )
+        }
+
+        let chunkSamples = 16_000 * 15
+        var pending: [Int16] = []
+        pending.reserveCapacity(chunkSamples + 16_384)
+        var chunkIndex = 0
+        var lines: [String] = []
+
+        func process(_ samples: [Int16]) throws {
+            let line: String? = try autoreleasepool {
+                let (mel, melLen) = try preprocess(audio: samples)
+                let (enc, encLen) = try encode(mel: mel, melLength: melLen)
+                let text = try decode(enc: enc, encLen: encLen)
+                guard !text.isEmpty else { return nil }
+                let secOffset = baseOffset + Double(chunkIndex * 15)
+                return "[\(formatElapsedTimestamp(secOffset))] \(text)"
+            }
+            if let line { lines.append(line) }
+            chunkIndex += 1
+        }
+
+        while let sampleBuffer = output.copyNextSampleBuffer() {
+            try Task.checkCancellation()
+            guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
+            let byteCount = CMBlockBufferGetDataLength(block)
+            guard byteCount >= MemoryLayout<Int16>.size else { continue }
+            let sampleCount = byteCount / MemoryLayout<Int16>.size
+            var samples = [Int16](repeating: 0, count: sampleCount)
+            let status = samples.withUnsafeMutableBytes { bytes -> OSStatus in
+                guard let baseAddress = bytes.baseAddress else { return -1 }
+                return CMBlockBufferCopyDataBytes(
+                    block,
+                    atOffset: 0,
+                    dataLength: sampleCount * MemoryLayout<Int16>.size,
+                    destination: baseAddress
+                )
+            }
+            guard status == kCMBlockBufferNoErr else {
+                reader.cancelReading()
+                throw NSError(
+                    domain: "transcribe",
+                    code: 9,
+                    userInfo: [NSLocalizedDescriptionKey: "An audio sample could not be read"]
+                )
+            }
+
+            pending.append(contentsOf: samples)
+            while pending.count >= chunkSamples {
+                let chunk = Array(pending.prefix(chunkSamples))
+                pending.removeFirst(chunkSamples)
+                try process(chunk)
             }
         }
-        return applyPostProcessing(fullText.trimmingCharacters(in: .whitespacesAndNewlines))
+
+        if reader.status == .failed {
+            throw reader.error ?? NSError(
+                domain: "transcribe",
+                code: 10,
+                userInfo: [NSLocalizedDescriptionKey: "Audio reading failed"]
+            )
+        }
+
+        if !pending.isEmpty {
+            pending.append(contentsOf: repeatElement(0, count: chunkSamples - pending.count))
+            try process(pending)
+        }
+
+        return applyPostProcessing(lines.joined(separator: "\n"))
     }
 
     func forceLoadSync() throws {
+        releaseModels()
         let dir = self.modelDir
         copyFromSourceIfNeeded()
 
@@ -218,19 +311,24 @@ final class Transcriber {
                           userInfo: [NSLocalizedDescriptionKey: "Models not available. Copy from SpikeMeetingLogger/Models to \(dir.path)"])
         }
 
-        preprocessor = try MLModel(contentsOf: dir.appendingPathComponent("Preprocessor.mlmodelc"))
-        encoder = try MLModel(contentsOf: dir.appendingPathComponent("Encoder.mlmodelc"))
-        decoder = try MLModel(contentsOf: dir.appendingPathComponent("Decoder.mlmodelc"))
-        joint = try MLModel(contentsOf: dir.appendingPathComponent("JointDecision.mlmodelc"))
+        do {
+            preprocessor = try MLModel(contentsOf: dir.appendingPathComponent("Preprocessor.mlmodelc"))
+            encoder = try MLModel(contentsOf: dir.appendingPathComponent("Encoder.mlmodelc"))
+            decoder = try MLModel(contentsOf: dir.appendingPathComponent("Decoder.mlmodelc"))
+            joint = try MLModel(contentsOf: dir.appendingPathComponent("JointDecision.mlmodelc"))
 
-        guard let vp = Self.vocabPath(for: dir) else {
-            throw NSError(domain: "transcribe", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "Vocab file not found in \(dir.path)"])
+            guard let vp = Self.vocabPath(for: dir) else {
+                throw NSError(domain: "transcribe", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Vocab file not found in \(dir.path)"])
+            }
+            let vocabData = try Data(contentsOf: URL(fileURLWithPath: vp))
+            vocab = try JSONSerialization.jsonObject(with: vocabData) as! [String: String]
+            loadedModelName = SettingsStore.shared.selectedModel
+            loaded = true
+        } catch {
+            releaseModels()
+            throw error
         }
-        let vocabData = try Data(contentsOf: URL(fileURLWithPath: vp))
-        vocab = try JSONSerialization.jsonObject(with: vocabData) as! [String: String]
-        loadedModelName = SettingsStore.shared.selectedModel
-        loaded = true
     }
 
     func forceLoad() async throws {

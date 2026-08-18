@@ -10,17 +10,33 @@ enum TranscriptSearchScope: String, CaseIterable, Identifiable, Sendable {
 }
 
 struct TranscriptSearchIndex: Equatable, Sendable {
-    let all: String
     let speech: String
     let notes: String
     let flags: String
 
     func text(for scope: TranscriptSearchScope) -> String {
         switch scope {
-        case .all: return all
+        case .all:
+            return [speech, notes, flags].filter { !$0.isEmpty }.joined(separator: "\n")
         case .speech: return speech
         case .notes: return notes
         case .flags: return flags
+        }
+    }
+
+    func matches(_ query: String, scope: TranscriptSearchScope) -> Bool {
+        guard !query.isEmpty else { return true }
+        switch scope {
+        case .all:
+            return speech.localizedCaseInsensitiveContains(query)
+                || notes.localizedCaseInsensitiveContains(query)
+                || flags.localizedCaseInsensitiveContains(query)
+        case .speech:
+            return speech.localizedCaseInsensitiveContains(query)
+        case .notes:
+            return notes.localizedCaseInsensitiveContains(query)
+        case .flags:
+            return flags.localizedCaseInsensitiveContains(query)
         }
     }
 }
@@ -55,11 +71,51 @@ enum TranscriptSearchSupport {
         let noteText = notes.joined(separator: "\n")
         let flagText = flags.joined(separator: "\n")
         return TranscriptSearchIndex(
-            all: [speechText, noteText, flagText].filter { !$0.isEmpty }.joined(separator: "\n"),
             speech: speechText,
             notes: noteText,
             flags: flagText
         )
+    }
+
+    static func context(in index: TranscriptSearchIndex, query: String, scope: TranscriptSearchScope) -> String? {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else { return nil }
+
+        func matchingLine(in text: String) -> String? {
+            text.components(separatedBy: .newlines).first {
+                $0.localizedCaseInsensitiveContains(trimmedQuery)
+            }
+        }
+
+        func speechContext() -> String? {
+            guard let line = matchingLine(in: index.speech) else { return nil }
+            if line.hasPrefix("Meeting ") {
+                return clipped("Meeting · " + String(line.dropFirst("Meeting ".count)))
+            }
+            if line.hasPrefix("You ") {
+                return clipped("You · " + String(line.dropFirst("You ".count)))
+            }
+            return clipped(line)
+        }
+
+        func noteContext() -> String? {
+            guard let line = matchingLine(in: index.notes) else { return nil }
+            let text = line.hasPrefix("note ") ? String(line.dropFirst("note ".count)) : line
+            return clipped("Note · " + text)
+        }
+
+        switch scope {
+        case .all:
+            return speechContext()
+                ?? noteContext()
+                ?? (index.flags.localizedCaseInsensitiveContains(trimmedQuery) ? "Flagged moment" : nil)
+        case .speech:
+            return speechContext()
+        case .notes:
+            return noteContext()
+        case .flags:
+            return index.flags.localizedCaseInsensitiveContains(trimmedQuery) ? "Flagged moment" : nil
+        }
     }
 
     static func context(in markdown: String, query: String, scope: TranscriptSearchScope) -> String? {

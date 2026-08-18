@@ -117,6 +117,8 @@ struct TranscriptNoteCard: View {
 
                 Button(action: onEdit) {
                     Image(systemName: "pencil")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(Color.white.opacity(0.62))
@@ -125,6 +127,8 @@ struct TranscriptNoteCard: View {
 
                 Button(action: onToggleCollapse) {
                     Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.borderless)
                 .foregroundStyle(Color.white.opacity(0.62))

@@ -81,14 +81,77 @@ final class TranscriptPlayer: ObservableObject {
     private var player: AVPlayer?
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    private var loadTask: Task<Void, Never>?
+    private var loadGeneration = UUID()
 
     func load(url: URL) {
         stop()
+        installPlayer(AVPlayer(url: url))
+    }
 
-        let newPlayer = AVPlayer(url: url)
+    func load(systemURL: URL?, microphoneURL: URL?) {
+        let urls = [systemURL, microphoneURL].compactMap { $0 }
+        guard !urls.isEmpty else {
+            stop()
+            return
+        }
+        guard urls.count > 1 else {
+            load(url: urls[0])
+            return
+        }
+
+        stop()
+        let generation = UUID()
+        loadGeneration = generation
+        loadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let composition = AVMutableComposition()
+                var insertedTrackCount = 0
+
+                for url in urls {
+                    let asset = AVURLAsset(url: url)
+                    guard let sourceTrack = try await asset.loadTracks(withMediaType: .audio).first else {
+                        continue
+                    }
+                    let sourceDuration = try await asset.load(.duration)
+                    guard sourceDuration.isNumeric,
+                          sourceDuration.seconds > 0,
+                          let destinationTrack = composition.addMutableTrack(
+                            withMediaType: .audio,
+                            preferredTrackID: kCMPersistentTrackID_Invalid
+                          ) else {
+                        continue
+                    }
+                    try destinationTrack.insertTimeRange(
+                        CMTimeRange(start: .zero, duration: sourceDuration),
+                        of: sourceTrack,
+                        at: .zero
+                    )
+                    insertedTrackCount += 1
+                }
+
+                guard !Task.isCancelled, self.loadGeneration == generation else { return }
+                self.loadTask = nil
+
+                if insertedTrackCount > 0 {
+                    self.installPlayer(AVPlayer(playerItem: AVPlayerItem(asset: composition)))
+                } else {
+                    self.installPlayer(AVPlayer(url: urls[0]))
+                }
+            } catch {
+                guard !Task.isCancelled, self.loadGeneration == generation else { return }
+                self.loadTask = nil
+                self.installPlayer(AVPlayer(url: urls[0]))
+            }
+        }
+    }
+
+    private func installPlayer(_ newPlayer: AVPlayer) {
         player = newPlayer
         hasAudio = true
         duration = 0
+
         if let asset = newPlayer.currentItem?.asset {
             Task { @MainActor [weak self] in
                 guard let loaded = try? await asset.load(.duration),
@@ -175,6 +238,10 @@ final class TranscriptPlayer: ObservableObject {
     }
 
     func stop() {
+        loadGeneration = UUID()
+        loadTask?.cancel()
+        loadTask = nil
+
         let oldPlayer = player
         oldPlayer?.pause()
         if let observer = timeObserver, let oldPlayer {
@@ -194,6 +261,7 @@ final class TranscriptPlayer: ObservableObject {
     }
 
     deinit {
+        loadTask?.cancel()
         if let observer = timeObserver, let player {
             player.removeTimeObserver(observer)
         }
@@ -246,6 +314,9 @@ struct ContentView: View {
     @State private var showingDeleteEverythingConfirm = false
     @State private var sessionToDelete: Session?
     @State private var searchIsPresented = false
+    @State private var sessionToRename: Session?
+    @State private var renameDraft = ""
+    @State private var showingRenamePrompt = false
 
     private var selectedMeeting: Session? {
         guard let id = store.selectedSession else { return nil }
@@ -257,9 +328,7 @@ struct ContentView: View {
             sidebar
                 .navigationSplitViewColumnWidth(250)
         } detail: {
-            PlayerObservedContent(player: player) {
-                detailPane
-            }
+            detailPane
         }
         .navigationSplitViewStyle(.balanced)
         .searchable(
@@ -274,6 +343,22 @@ struct ContentView: View {
             Button("Continue") { capture.confirmLowDiskStart() }
         } message: {
             Text("Less than 2 GB of free disk space available. Recording may fail if space runs out.")
+        }
+        .alert("Rename Meeting", isPresented: $showingRenamePrompt) {
+            TextField("Meeting name", text: $renameDraft)
+            Button("Cancel", role: .cancel) {
+                sessionToRename = nil
+                renameDraft = ""
+            }
+            Button("Rename") {
+                guard let session = sessionToRename else { return }
+                store.renameSession(session, to: renameDraft)
+                sessionToRename = nil
+                renameDraft = ""
+            }
+            .disabled(renameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Enter a new name for this meeting.")
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("CounterfoilFind"))) { _ in
             searchIsPresented = true
@@ -429,6 +514,21 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
+            .background {
+                Rectangle()
+                    .fill(.regularMaterial)
+                    .mask {
+                        LinearGradient(
+                            stops: [
+                                .init(color: .black, location: 0),
+                                .init(color: .black, location: 0.76),
+                                .init(color: .clear, location: 1)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
+            }
     }
 
     private var sidebarFooter: some View {
@@ -522,6 +622,12 @@ struct ContentView: View {
         }
     }
 
+    private func beginRenaming(_ session: Session) {
+        sessionToRename = session
+        renameDraft = session.title
+        showingRenamePrompt = true
+    }
+
     private func sessionRow(_ session: Session) -> some View {
         let selected = store.selectedSession == session.id
         let rowHeight: CGFloat = store.searchQuery.isEmpty ? 44 : 60
@@ -565,6 +671,11 @@ struct ContentView: View {
             }
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded {
+                beginRenaming(session)
+            }
+        )
         .frame(maxWidth: .infinity)
         .padding(.vertical, 1)
         .transaction { transaction in
@@ -572,6 +683,14 @@ struct ContentView: View {
         }
         .accessibilityAddTraits(selected ? .isSelected : [])
         .contextMenu {
+            Button {
+                beginRenaming(session)
+            } label: {
+                Label("Rename…", systemImage: "pencil")
+            }
+
+            Divider()
+
             Button {
                 copyTranscript(session: session)
             } label: {
@@ -650,6 +769,11 @@ struct ContentView: View {
                         .font(.title.weight(.semibold))
                         .lineLimit(1)
                         .truncationMode(.middle)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) {
+                            beginRenaming(session)
+                        }
+                        .help("Double-click to rename")
 
                     HStack(spacing: 8) {
                         Label {
@@ -677,10 +801,12 @@ struct ContentView: View {
                 .padding(.bottom, 18)
             }
 
-            if player.hasAudio {
-                readingColumn {
-                    transportBar(session: session)
-                        .padding(.bottom, 14)
+            PlayerObservedContent(player: player) {
+                if player.hasAudio {
+                    readingColumn {
+                        transportBar(session: session)
+                            .padding(.bottom, 14)
+                    }
                 }
             }
 
@@ -864,10 +990,23 @@ struct ContentView: View {
 
     private func loadPlayer(for session: Session) {
         let directory = URL(fileURLWithPath: session.dayDir, isDirectory: true)
-        let m4a = directory.appendingPathComponent(session.systemAudioFilename ?? "\(session.stem).m4a")
+        let systemCandidate = directory.appendingPathComponent(
+            session.systemAudioFilename ?? "\(session.stem).m4a"
+        )
+        let microphoneCandidate = directory.appendingPathComponent(
+            session.microphoneAudioFilename ?? "\(session.stem).mic.m4a"
+        )
         let mp4 = directory.appendingPathComponent("\(session.stem).mp4")
-        if FileManager.default.fileExists(atPath: m4a.path) {
-            player.load(url: m4a)
+
+        let systemURL = FileManager.default.fileExists(atPath: systemCandidate.path)
+            ? systemCandidate
+            : nil
+        let microphoneURL = FileManager.default.fileExists(atPath: microphoneCandidate.path)
+            ? microphoneCandidate
+            : nil
+
+        if systemURL != nil || microphoneURL != nil {
+            player.load(systemURL: systemURL, microphoneURL: microphoneURL)
         } else if FileManager.default.fileExists(atPath: mp4.path) {
             player.load(url: mp4)
         }
@@ -1217,7 +1356,6 @@ struct ModelsSettingsView: View {
                     }
                     .onChange(of: selectedModel) { _, model in
                         settings.selectedModel = model
-                        Task { await Transcriber.shared.preloadModels() }
                     }
                 }
             } header: {
@@ -1229,7 +1367,7 @@ struct ModelsSettingsView: View {
             Section("Available models") {
                 modelCard(
                     title: "Parakeet V2",
-                    detail: "~450 MB · default model",
+                    detail: "~450 MB · English",
                     installed: v2Completed || settings.hasModel(named: "Parakeet V2"),
                     downloading: v2Downloading,
                     progress: v2Progress,
@@ -1238,7 +1376,7 @@ struct ModelsSettingsView: View {
                 )
                 modelCard(
                     title: "Parakeet V3",
-                    detail: "~461 MB · improved accuracy",
+                    detail: "~461 MB · Multilingual",
                     installed: v3Completed || settings.hasModel(named: v3Name),
                     downloading: v3Downloading,
                     progress: v3Progress,
@@ -1310,7 +1448,6 @@ struct ModelsSettingsView: View {
                     v2Completed = true
                     v2Progress = 1
                     settings.refreshAvailableModels()
-                    Task { await Transcriber.shared.preloadModels() }
                 case .failure(let error):
                     v2Error = error.localizedDescription
                 }
@@ -1332,7 +1469,6 @@ struct ModelsSettingsView: View {
                     v3Completed = true
                     v3Progress = 1
                     settings.refreshAvailableModels()
-                    Task { await Transcriber.shared.preloadModels() }
                 case .failure(let error):
                     v3Error = error.localizedDescription
                 }
@@ -1348,17 +1484,20 @@ struct ModelsSettingsView: View {
                 }
 
                 let archivePath = FileManager.default.temporaryDirectory.appendingPathComponent("\(label)-\(UUID().uuidString).tar.gz")
-                let (bytes, response) = try await withProgressDownload(url: url, progress: progress)
-                try bytes.write(to: archivePath)
+                let (downloadedURL, response) = try await withProgressDownload(url: url, progress: progress)
 
                 guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
+                    try? FileManager.default.removeItem(at: downloadedURL)
                     throw NSError(domain: "download", code: 2, userInfo: [NSLocalizedDescriptionKey: "Download failed with HTTP error"])
                 }
+
+                try? FileManager.default.removeItem(at: archivePath)
+                try FileManager.default.moveItem(at: downloadedURL, to: archivePath)
+                defer { try? FileManager.default.removeItem(at: archivePath) }
 
                 let modelsDirectory = Transcriber.modelsDir
                 try FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
                 let extracted = try await extractTarGz(at: archivePath, to: modelsDirectory)
-                try? FileManager.default.removeItem(at: archivePath)
                 guard let extracted else {
                     throw NSError(domain: "download", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to extract archive"])
                 }
@@ -1375,40 +1514,45 @@ struct ModelsSettingsView: View {
         }
     }
 
-    private func withProgressDownload(url: URL, progress: @escaping (Double) -> Void) async throws -> (Data, URLResponse) {
+    private func withProgressDownload(url: URL, progress: @escaping (Double) -> Void) async throws -> (URL, URLResponse) {
         var request = URLRequest(url: url)
         request.timeoutInterval = 3600
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (temporaryURL, response) = try await URLSession.shared.download(for: request)
         progress(1)
-        return (data, response)
+        return (temporaryURL, response)
     }
 
     private func extractTarGz(at archivePath: URL, to destination: URL) async throws -> URL? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        process.arguments = ["-xzf", archivePath.path, "-C", destination.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
+        try await Task.detached(priority: .utility) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+            process.arguments = ["-xzf", archivePath.path, "-C", destination.path]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
 
-        let fileManager = FileManager.default
-        let contents = try? fileManager.contentsOfDirectory(at: destination, includingPropertiesForKeys: [.contentModificationDateKey])
-        let sorted = (contents ?? []).sorted {
-            let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
-            let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
-            return left > right
-        }
-        for item in sorted {
-            var isDirectory: ObjCBool = false
-            if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory),
-               isDirectory.boolValue,
-               fileManager.fileExists(atPath: item.appendingPathComponent("Preprocessor.mlmodelc").path) {
-                return item
+            let fileManager = FileManager.default
+            let contents = try? fileManager.contentsOfDirectory(
+                at: destination,
+                includingPropertiesForKeys: [.contentModificationDateKey]
+            )
+            let sorted = (contents ?? []).sorted {
+                let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
+                let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
+                return left > right
             }
-        }
-        return destination
+            for item in sorted {
+                var isDirectory: ObjCBool = false
+                if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory),
+                   isDirectory.boolValue,
+                   fileManager.fileExists(atPath: item.appendingPathComponent("Preprocessor.mlmodelc").path) {
+                    return item
+                }
+            }
+            return destination
+        }.value
     }
 }
 

@@ -42,6 +42,7 @@ private final class SystemAudioCapture: NSObject, SCStreamOutput, @unchecked Sen
             AVNumberOfChannelsKey: 2,
             AVEncoderBitRateKey: 192_000,
         ])
+        newInput.expectsMediaDataInRealTime = true
         guard newWriter.canAdd(newInput) else {
             throw NSError(
                 domain: "CounterfoilCapture",
@@ -52,12 +53,16 @@ private final class SystemAudioCapture: NSObject, SCStreamOutput, @unchecked Sen
         newWriter.add(newInput)
 
         let configuration = SCStreamConfiguration()
-        configuration.width = Int(display.width)
-        configuration.height = Int(display.height)
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 15)
+        // No video buffers are consumed. A 2 × 2, 1 fps visual stream keeps
+        // ScreenCaptureKit's display work minimal while audio remains full quality.
+        configuration.width = 2
+        configuration.height = 2
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
         configuration.queueDepth = 3
         configuration.showsCursor = false
         configuration.capturesAudio = true
+        configuration.sampleRate = 48_000
+        configuration.channelCount = 2
         configuration.captureMicrophone = false
         configuration.excludesCurrentProcessAudio = true
 
@@ -775,6 +780,7 @@ final class CaptureManager: ObservableObject {
             resetCaptureResourcesForProcessing()
 
             do {
+                defer { Transcriber.shared.releaseModels() }
                 let systemText = try await Transcriber.shared.transcribe(
                     filePath: finalSystemURL.path,
                     baseOffset: 0

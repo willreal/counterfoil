@@ -27,6 +27,9 @@ struct TranscriptSearchTests {
         let index = TranscriptSearchSupport.makeIndex(from: transcript)
         #expect(index.text(for: .all).localizedCaseInsensitiveContains("flagged"))
         #expect(index.text(for: .flags).localizedCaseInsensitiveContains("flagged moment"))
+        #expect(index.matches("flagged", scope: .all))
+        #expect(index.matches("budget", scope: .notes))
+        #expect(!index.matches("budget", scope: .speech))
     }
 
     @Test func contextsDescribeSemanticEventType() {
@@ -34,5 +37,10 @@ struct TranscriptSearchTests {
         #expect(TranscriptSearchSupport.context(in: transcript, query: "flagged", scope: .all) == "Flagged moment")
         #expect(TranscriptSearchSupport.context(in: transcript, query: "legacy", scope: .speech) == "Meeting · legacy system audio line")
         #expect(TranscriptSearchSupport.context(in: transcript, query: "budget", scope: .speech) == nil)
+
+        let index = TranscriptSearchSupport.makeIndex(from: transcript)
+        #expect(TranscriptSearchSupport.context(in: index, query: "budget", scope: .all) == "Note · remember to check the budget")
+        #expect(TranscriptSearchSupport.context(in: index, query: "flagged", scope: .flags) == "Flagged moment")
+        #expect(TranscriptSearchSupport.context(in: index, query: "legacy", scope: .speech) == "Meeting · legacy system audio line")
     }
 }

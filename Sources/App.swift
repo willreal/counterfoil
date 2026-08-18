@@ -22,9 +22,6 @@ struct CounterfoilApp: App {
                 .task {
                     await store.loadSessions()
                 }
-                .task {
-                    await Transcriber.shared.preloadModels()
-                }
         }
         .windowStyle(.titleBar)
         .commands {
