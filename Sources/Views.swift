@@ -49,14 +49,6 @@ func formatDuration(_ duration: TimeInterval) -> String {
     return String(format: "%d:%02d", totalSeconds / 60, totalSeconds % 60)
 }
 
-func formatRecordingClock(_ duration: TimeInterval) -> String {
-    let totalSeconds = max(0, Int(duration))
-    if totalSeconds >= 3600 {
-        return String(format: "%d:%02d:%02d", totalSeconds / 3600, (totalSeconds / 60) % 60, totalSeconds % 60)
-    }
-    return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
-}
-
 func formatTimestamp(_ duration: TimeInterval) -> String {
     let totalSeconds = max(0, Int(duration))
     return String(format: "%02d:%02d:%02d", totalSeconds / 3600, (totalSeconds / 60) % 60, totalSeconds % 60)
@@ -288,6 +280,101 @@ private struct PlayerObservedContent<Content: View>: View {
     }
 }
 
+private struct CaptureLifecycleObserver: View {
+    @ObservedObject var capture: CaptureManager
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .alert("Low Disk Space", isPresented: $capture.showLowDiskAlert) {
+                Button("Cancel", role: .cancel) { capture.cancelLowDiskStart() }
+                Button("Continue") { capture.confirmLowDiskStart() }
+            } message: {
+                Text("Less than 2 GB of free disk space available. Recording may fail if space runs out.")
+            }
+            .onChange(of: capture.phase) { _, phase in
+                if phase.presentsRecordingPanel {
+                    openWindow(id: RecordingWindowView.windowID)
+                } else {
+                    dismissWindow(id: RecordingWindowView.windowID)
+                }
+            }
+            .onAppear {
+                if capture.phase.presentsRecordingPanel {
+                    openWindow(id: RecordingWindowView.windowID)
+                }
+            }
+    }
+}
+
+private struct LiveRecordingSidebarHost: View {
+    @ObservedObject var capture: CaptureManager
+
+    var body: some View {
+        if capture.phase.presentsRecordingPanel {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(capture.activeTitle.isEmpty ? "Untitled meeting" : capture.activeTitle)
+                        .font(.body.weight(.semibold))
+                        .lineLimit(1)
+                    HStack(spacing: 6) {
+                        Label(capture.phase.statusText, systemImage: "record.circle.fill")
+                        Text(formatRecordingClock(capture.recordingDuration))
+                            .monospacedDigit()
+                        if capture.flagCount > 0 { Text("\(capture.flagCount) flags") }
+                        if capture.noteCount > 0 { Text("\(capture.noteCount) notes") }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(capture.phase.isPaused ? Color.orange : counterfoilRed)
+                }
+                Spacer(minLength: 0)
+                if capture.phase == .preparing || capture.phase == .saving {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+        }
+    }
+}
+
+private struct CaptureAwareEmptySidebar: View {
+    @ObservedObject var capture: CaptureManager
+
+    var body: some View {
+        if !capture.phase.presentsRecordingPanel {
+            ContentUnavailableView("No meetings yet", systemImage: "waveform")
+                .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+private struct RecordMeetingButton: View {
+    @ObservedObject var capture: CaptureManager
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button {
+            capture.start()
+            openWindow(id: RecordingWindowView.windowID)
+        } label: {
+            Label("Record Meeting", systemImage: "record.circle.fill")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 20)
+                .frame(height: 42)
+        }
+        .buttonStyle(.glassProminent)
+        .buttonBorderShape(.capsule)
+        .tint(counterfoilRed)
+        .glassEffectTransition(.identity)
+        .help("Start a recording")
+        .disabled(!RecordingTransition.allows(.start, from: capture.phase))
+    }
+}
+
 struct ContentView: View {
     private static let sidebarDayFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -302,7 +389,7 @@ struct ContentView: View {
     }()
 
     @ObservedObject var store: TranscriptStore
-    @ObservedObject var capture: CaptureManager
+    let capture: CaptureManager
 
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
@@ -338,12 +425,7 @@ struct ContentView: View {
             prompt: "Titles, Speech, Notes, Flags"
         )
         .toolbar { mainToolbarContent }
-        .alert("Low Disk Space", isPresented: $capture.showLowDiskAlert) {
-            Button("Cancel", role: .cancel) { capture.cancelLowDiskStart() }
-            Button("Continue") { capture.confirmLowDiskStart() }
-        } message: {
-            Text("Less than 2 GB of free disk space available. Recording may fail if space runs out.")
-        }
+        .background { CaptureLifecycleObserver(capture: capture) }
         .alert("Rename Meeting", isPresented: $showingRenamePrompt) {
             TextField("Meeting name", text: $renameDraft)
             Button("Cancel", role: .cancel) {
@@ -370,20 +452,10 @@ struct ContentView: View {
             hasSeenOnboarding = false
             openWindow(id: OnboardingView.windowID)
         }
-        .onChange(of: capture.phase) { _, phase in
-            if phase.presentsRecordingPanel {
-                openWindow(id: RecordingWindowView.windowID)
-            } else {
-                dismissWindow(id: RecordingWindowView.windowID)
-            }
-        }
         .onChange(of: store.selectedSession) { _, id in
             selectSession(id)
         }
         .onAppear {
-            if capture.phase.presentsRecordingPanel {
-                openWindow(id: RecordingWindowView.windowID)
-            }
             if !hasSeenOnboarding {
                 DispatchQueue.main.async {
                     openWindow(id: OnboardingView.windowID)
@@ -466,11 +538,7 @@ struct ContentView: View {
     private var sidebar: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                if capture.phase.presentsRecordingPanel {
-                    liveRecordingRow
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                }
+                LiveRecordingSidebarHost(capture: capture)
 
                 if !store.orphanSessions.isEmpty && store.searchQuery.isEmpty {
                     Section {
@@ -483,10 +551,10 @@ struct ContentView: View {
                 }
 
                 if store.displayedSessions.isEmpty {
-                    if store.searchQuery.isEmpty && store.sessions.isEmpty && !capture.phase.presentsRecordingPanel {
-                        emptySidebar
-                    } else if !store.searchQuery.isEmpty {
+                    if !store.searchQuery.isEmpty {
                         noSearchResults
+                    } else if store.sessions.isEmpty {
+                        CaptureAwareEmptySidebar(capture: capture)
                     }
                 } else {
                     ForEach(groupedDays(), id: \.0) { group in
@@ -534,22 +602,7 @@ struct ContentView: View {
     private var sidebarFooter: some View {
         HStack {
             Spacer(minLength: 0)
-            Button {
-                capture.start()
-                openWindow(id: RecordingWindowView.windowID)
-            } label: {
-                Label("Record Meeting", systemImage: "record.circle.fill")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 20)
-                    .frame(height: 42)
-            }
-            .buttonStyle(.glassProminent)
-            .buttonBorderShape(.capsule)
-            .tint(counterfoilRed)
-            .glassEffectTransition(.identity)
-            .help("Start a recording")
-            .disabled(!RecordingTransition.allows(.start, from: capture.phase))
+            RecordMeetingButton(capture: capture)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
@@ -557,34 +610,6 @@ struct ContentView: View {
         .padding(.bottom, 10)
         .frame(maxWidth: .infinity)
         .background { ProgressiveSidebarFooterBackground() }
-    }
-
-    private var liveRecordingRow: some View {
-        HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(capture.activeTitle.isEmpty ? "Untitled meeting" : capture.activeTitle)
-                    .font(.body.weight(.semibold))
-                    .lineLimit(1)
-                HStack(spacing: 6) {
-                    Label(capture.phase.statusText, systemImage: "record.circle.fill")
-                    Text(formatRecordingClock(capture.recordingDuration))
-                        .monospacedDigit()
-                    if capture.flagCount > 0 { Text("\(capture.flagCount) flags") }
-                    if capture.noteCount > 0 { Text("\(capture.noteCount) notes") }
-                }
-                .font(.caption)
-                .foregroundStyle(capture.phase.isPaused ? Color.orange : counterfoilRed)
-            }
-            Spacer(minLength: 0)
-            if capture.phase == .preparing || capture.phase == .saving {
-                ProgressView().controlSize(.small)
-            }
-        }
-    }
-
-    private var emptySidebar: some View {
-        ContentUnavailableView("No meetings yet", systemImage: "waveform")
-            .frame(maxWidth: .infinity)
     }
 
     private var noSearchResults: some View {
@@ -1027,13 +1052,17 @@ struct ContentView: View {
 
     private func revealInFinder(session: Session) {
         let directory = URL(fileURLWithPath: session.dayDir, isDirectory: true)
-        let names = [
+        var names = Set([
             session.transcriptFilename,
             session.systemAudioFilename ?? "\(session.stem).m4a",
             "\(session.stem).mp4",
             session.microphoneAudioFilename ?? "\(session.stem).mic.m4a",
             session.metadataFilename ?? ""
-        ]
+        ])
+        if let metadataFilename = session.metadataFilename,
+           let metadata = try? SessionMetadataIO.read(from: directory.appendingPathComponent(metadataFilename)) {
+            metadata.allAudioFilenames.forEach { names.insert($0) }
+        }
         let urls = names
             .map { directory.appendingPathComponent($0) }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
@@ -1348,7 +1377,10 @@ struct ModelsSettingsView: View {
                     Label("Install a model below to enable transcription", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
                 } else {
-                    Picker("Default model", selection: $selectedModel) {
+                    Picker("Transcription model", selection: $selectedModel) {
+                        if selectedModel.isEmpty {
+                            Text("Choose a model").tag("")
+                        }
                         ForEach(installedModels, id: \.self) { model in
                             Text(model == v3Name ? "Parakeet V3" : "Parakeet V2")
                                 .tag(model)
@@ -1359,7 +1391,7 @@ struct ModelsSettingsView: View {
                     }
                 }
             } header: {
-                Text("Default model")
+                Text("Transcription model")
             } footer: {
                 Text("The selected model is used for future transcriptions. Models are stored outside the app bundle.")
             }
@@ -1398,9 +1430,10 @@ struct ModelsSettingsView: View {
     }
 
     private func syncSelection() {
-        guard !installedModels.contains(selectedModel), let first = installedModels.first else { return }
-        selectedModel = first
-        settings.selectedModel = first
+        guard !installedModels.contains(selectedModel) else { return }
+        let resolved = installedModels.count == 1 ? installedModels[0] : ""
+        selectedModel = resolved
+        settings.selectedModel = resolved
     }
 
     private func modelCard(title: String, detail: String, installed: Bool, downloading: Bool, progress: Double, error: String?, download: @escaping () -> Void) -> some View {
@@ -1477,82 +1510,19 @@ struct ModelsSettingsView: View {
     }
 
     private func performDownload(urlString: String, label: String, progress: @escaping (Double) -> Void, completion: @escaping (Result<Void, Error>) -> Void) {
+        let modelName = label == "parakeet-v2" ? "Parakeet V2" : v3Name
         Task {
             do {
-                guard let url = URL(string: urlString) else {
-                    throw NSError(domain: "download", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
-                }
-
-                let archivePath = FileManager.default.temporaryDirectory.appendingPathComponent("\(label)-\(UUID().uuidString).tar.gz")
-                let (downloadedURL, response) = try await withProgressDownload(url: url, progress: progress)
-
-                guard let response = response as? HTTPURLResponse, (200...299).contains(response.statusCode) else {
-                    try? FileManager.default.removeItem(at: downloadedURL)
-                    throw NSError(domain: "download", code: 2, userInfo: [NSLocalizedDescriptionKey: "Download failed with HTTP error"])
-                }
-
-                try? FileManager.default.removeItem(at: archivePath)
-                try FileManager.default.moveItem(at: downloadedURL, to: archivePath)
-                defer { try? FileManager.default.removeItem(at: archivePath) }
-
-                let modelsDirectory = Transcriber.modelsDir
-                try FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
-                let extracted = try await extractTarGz(at: archivePath, to: modelsDirectory)
-                guard let extracted else {
-                    throw NSError(domain: "download", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to extract archive"])
-                }
-
-                for name in ["Preprocessor", "Encoder", "Decoder", "JointDecision"] {
-                    guard FileManager.default.fileExists(atPath: extracted.appendingPathComponent("\(name).mlmodelc").path) else {
-                        throw NSError(domain: "download", code: 4, userInfo: [NSLocalizedDescriptionKey: "Archive missing \(name).mlmodelc"])
-                    }
-                }
+                try await ModelInstaller.install(
+                    urlString: urlString,
+                    modelName: modelName,
+                    progress: { value in DispatchQueue.main.async { progress(value) } }
+                )
                 completion(.success(()))
             } catch {
                 completion(.failure(error))
             }
         }
-    }
-
-    private func withProgressDownload(url: URL, progress: @escaping (Double) -> Void) async throws -> (URL, URLResponse) {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 3600
-        let (temporaryURL, response) = try await URLSession.shared.download(for: request)
-        progress(1)
-        return (temporaryURL, response)
-    }
-
-    private func extractTarGz(at archivePath: URL, to destination: URL) async throws -> URL? {
-        try await Task.detached(priority: .utility) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-            process.arguments = ["-xzf", archivePath.path, "-C", destination.path]
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-
-            let fileManager = FileManager.default
-            let contents = try? fileManager.contentsOfDirectory(
-                at: destination,
-                includingPropertiesForKeys: [.contentModificationDateKey]
-            )
-            let sorted = (contents ?? []).sorted {
-                let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
-                let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date.distantPast
-                return left > right
-            }
-            for item in sorted {
-                var isDirectory: ObjCBool = false
-                if fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory),
-                   isDirectory.boolValue,
-                   fileManager.fileExists(atPath: item.appendingPathComponent("Preprocessor.mlmodelc").path) {
-                    return item
-                }
-            }
-            return destination
-        }.value
     }
 }
 

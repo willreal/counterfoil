@@ -29,54 +29,58 @@ final class Transcriber {
 
     var currentModelName: String { loadedModelName }
 
-    var modelDir: URL {
-        let name = SettingsStore.shared.selectedModel
-        let base = Self.modelsDir
-        if name == "Parakeet V2" || name.isEmpty {
-            return base
-        }
-        let subdir = base.appendingPathComponent(name)
+    static func installDirectory(for modelName: String) -> URL {
+        modelsDir.appendingPathComponent(modelName, isDirectory: true)
+    }
+
+    static func modelDirectoryIsComplete(_ dir: URL) -> Bool {
         let fm = FileManager.default
-        if fm.fileExists(atPath: subdir.path) {
-            return subdir
-        }
-        return base
+        let names = ["Preprocessor", "Encoder", "Decoder", "JointDecision"]
+        return names.allSatisfy {
+            fm.fileExists(atPath: dir.appendingPathComponent("\($0).mlmodelc").path)
+        } && modelDirHasVocab(dir)
+    }
+
+    static func directory(for modelName: String) -> URL {
+        let base = modelsDir
+        let named = installDirectory(for: modelName)
+        if !modelName.isEmpty, modelDirectoryIsComplete(named) { return named }
+        if modelName == "Parakeet V2", modelDirectoryIsComplete(base) { return base }
+        return named
+    }
+
+    var modelDir: URL {
+        Self.directory(for: SettingsStore.shared.selectedModel)
     }
 
     /// Blank token: the model emits vocab_size + 1 logits (blank is the last).
     /// v2: model emits 1025 logits (1024 BPE + blank) — blank = 1024.
-    ///     The vocab JSON has 1031 entries (misaligned) — vocab.count is WRONG here.
     /// v3: model emits 8193 logits (8192 BPE + blank) — blank = 8192.
     var blankToken: Int32 {
-        if currentModelName == "Parakeet V2" || currentModelName.isEmpty {
-            return 1024
-        }
-        return 8192
+        loadedModelName == "Parakeet V2" ? 1024 : 8192
     }
 
     static func scanAvailableModels() -> [String] {
         let dir = modelsDir
         let fm = FileManager.default
-        let names = ["Preprocessor", "Encoder", "Decoder", "JointDecision"]
-        var models: [String] = []
+        var models = Set<String>()
 
         if let contents = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-            for item in contents {
-                var isDir: ObjCBool = false
-                guard fm.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue else { continue }
-                let ok = names.allSatisfy { fm.fileExists(atPath: item.appendingPathComponent("\($0).mlmodelc").path) }
-                    && modelDirHasVocab(item)
-                if ok { models.append(item.lastPathComponent) }
+            for item in contents where modelDirectoryIsComplete(item) {
+                models.insert(item.lastPathComponent)
             }
         }
-
-        let hasVocab = fm.fileExists(atPath: dir.appendingPathComponent("parakeet_vocab.json").path)
-        let hasFlat = names.allSatisfy { fm.fileExists(atPath: dir.appendingPathComponent("\($0).mlmodelc").path) }
-        if hasFlat && hasVocab {
-            models.append("Parakeet V2")
+        if modelDirectoryIsComplete(dir) {
+            models.insert("Parakeet V2")
         }
 
-        return models
+        let preferred = ["Parakeet V2", "parakeet-tdt-0.6b-v3-coreml"]
+        return models.sorted { left, right in
+            let li = preferred.firstIndex(of: left) ?? Int.max
+            let ri = preferred.firstIndex(of: right) ?? Int.max
+            if li != ri { return li < ri }
+            return left.localizedCaseInsensitiveCompare(right) == .orderedAscending
+        }
     }
 
     static func modelDirHasVocab(_ dir: URL) -> Bool {
@@ -94,61 +98,37 @@ final class Transcriber {
         return nil
     }
 
+    static func modelsAvailable(named modelName: String) -> Bool {
+        !modelName.isEmpty && modelDirectoryIsComplete(directory(for: modelName))
+    }
+
     var modelsAvailable: Bool {
-        let fm = FileManager.default
-        let names = ["Preprocessor", "Encoder", "Decoder", "JointDecision"]
-        let dir = modelDir
-        for name in names {
-            if !fm.fileExists(atPath: dir.appendingPathComponent("\(name).mlmodelc").path) {
-                return false
-            }
-        }
-        return Self.vocabPath(for: dir) != nil
+        Self.modelsAvailable(named: SettingsStore.shared.selectedModel)
     }
 
     var modelsMissingReason: String {
+        let selected = SettingsStore.shared.selectedModel
+        guard !selected.isEmpty else { return "No model selected" }
         let fm = FileManager.default
-        let dir = modelDir
+        let dir = Self.directory(for: selected)
         var missing: [String] = []
         for name in ["Preprocessor", "Encoder", "Decoder", "JointDecision"] {
             if !fm.fileExists(atPath: dir.appendingPathComponent("\(name).mlmodelc").path) {
                 missing.append("\(name).mlmodelc")
             }
         }
-        if Self.vocabPath(for: dir) == nil {
-            missing.append("parakeet_vocab.json")
-        }
-        if missing.isEmpty { return "" }
-        return "Missing: \(missing.joined(separator: ", "))"
+        if Self.vocabPath(for: dir) == nil { missing.append("vocabulary") }
+        return missing.isEmpty ? "" : "Missing: \(missing.joined(separator: ", "))"
     }
 
     func preloadModels() async {
         let targetName = SettingsStore.shared.selectedModel
-        if loaded && loadedModelName == targetName { return }
-        releaseModels()
-        loadedModelName = targetName
-        let dir = self.modelDir
-
-        copyFromSourceIfNeeded()
-
-        guard modelsAvailable else {
-            loadedModelName = ""
+        guard !targetName.isEmpty else {
+            releaseModels()
             return
         }
-
         do {
-            preprocessor = try MLModel(contentsOf: dir.appendingPathComponent("Preprocessor.mlmodelc"))
-            encoder = try MLModel(contentsOf: dir.appendingPathComponent("Encoder.mlmodelc"))
-            decoder = try MLModel(contentsOf: dir.appendingPathComponent("Decoder.mlmodelc"))
-            joint = try MLModel(contentsOf: dir.appendingPathComponent("JointDecision.mlmodelc"))
-
-            guard let vp = Self.vocabPath(for: dir) else {
-                releaseModels()
-                return
-            }
-            let vocabData = try Data(contentsOf: URL(fileURLWithPath: vp))
-            vocab = try JSONSerialization.jsonObject(with: vocabData) as! [String: String]
-            loaded = true
+            try forceLoadSync(modelName: targetName)
         } catch {
             print("model preload error: \(error)")
             releaseModels()
@@ -165,37 +145,80 @@ final class Transcriber {
         loadedModelName = ""
     }
 
-    private func copyFromSourceIfNeeded() {
+    private func copyFromSourceIfNeeded(for modelName: String) {
+        guard modelName == "Parakeet V2" else { return }
+        if Self.modelsAvailable(named: modelName) { return }
         let fm = FileManager.default
-        let dest = modelDir
         let src = Self.sourceModelsDir
-
-        if !fm.fileExists(atPath: dest.path) || ((try? fm.contentsOfDirectory(atPath: dest.path)) ?? []).isEmpty {
-            if fm.fileExists(atPath: src.path) {
-                try? fm.createDirectory(at: dest, withIntermediateDirectories: true)
-                if let items = try? fm.contentsOfDirectory(atPath: src.path) {
-                    for item in items {
-                        let s = src.appendingPathComponent(item)
-                        let d = dest.appendingPathComponent(item)
-                        try? fm.removeItem(at: d)
-                        try? fm.copyItem(at: s, to: d)
-                    }
-                }
+        guard Self.modelDirectoryIsComplete(src) else { return }
+        let dest = Self.installDirectory(for: modelName)
+        try? fm.removeItem(at: dest)
+        do {
+            try fm.createDirectory(at: dest, withIntermediateDirectories: true)
+            for item in try fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil) {
+                try fm.copyItem(at: item, to: dest.appendingPathComponent(item.lastPathComponent))
             }
+        } catch {
+            try? fm.removeItem(at: dest)
         }
     }
 
-    func preloadModels(forceModel: String) async {
-        SettingsStore.shared.selectedModel = forceModel
-        await preloadModels()
-    }
-
-    func transcribe(filePath: String, baseOffset: TimeInterval = 0) async throws -> String {
-        let selectedModel = SettingsStore.shared.selectedModel
-        if !loaded || loadedModelName != selectedModel {
-            try await forceLoad()
+    func forceLoadSync(modelName: String) throws {
+        guard !modelName.isEmpty else {
+            throw NSError(domain: "transcribe", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "No transcription model is selected"])
+        }
+        if loaded && loadedModelName == modelName { return }
+        releaseModels()
+        copyFromSourceIfNeeded(for: modelName)
+        let dir = Self.directory(for: modelName)
+        guard Self.modelDirectoryIsComplete(dir) else {
+            throw NSError(domain: "transcribe", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Model \(modelName) is not installed"])
         }
 
+        do {
+            preprocessor = try MLModel(contentsOf: dir.appendingPathComponent("Preprocessor.mlmodelc"))
+            encoder = try MLModel(contentsOf: dir.appendingPathComponent("Encoder.mlmodelc"))
+            decoder = try MLModel(contentsOf: dir.appendingPathComponent("Decoder.mlmodelc"))
+            joint = try MLModel(contentsOf: dir.appendingPathComponent("JointDecision.mlmodelc"))
+            guard let vp = Self.vocabPath(for: dir) else {
+                throw NSError(domain: "transcribe", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "Vocabulary file not found in \(dir.path)"])
+            }
+            let vocabData = try Data(contentsOf: URL(fileURLWithPath: vp))
+            vocab = try JSONSerialization.jsonObject(with: vocabData) as! [String: String]
+            loadedModelName = modelName
+            loaded = true
+        } catch {
+            releaseModels()
+            throw error
+        }
+    }
+
+    func forceLoadSync() throws {
+        try forceLoadSync(modelName: SettingsStore.shared.selectedModel)
+    }
+
+    func forceLoad() async throws {
+        try forceLoadSync()
+    }
+
+    func transcribe(
+        filePath: String,
+        baseOffset: TimeInterval = 0,
+        modelName: String? = nil
+    ) async throws -> String {
+        let target = modelName ?? SettingsStore.shared.selectedModel
+        try forceLoadSync(modelName: target)
+        return try await transcribeLoaded(filePath: filePath, baseOffset: baseOffset)
+    }
+
+    func transcribeLoaded(filePath: String, baseOffset: TimeInterval = 0) async throws -> String {
+        guard loaded else {
+            throw NSError(domain: "transcribe", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Transcription model is not loaded"])
+        }
         let url = URL(fileURLWithPath: filePath)
         let asset = AVURLAsset(url: url)
         let tracks = try await asset.loadTracks(withMediaType: .audio)
@@ -299,40 +322,6 @@ final class Transcriber {
         }
 
         return applyPostProcessing(lines.joined(separator: "\n"))
-    }
-
-    func forceLoadSync() throws {
-        releaseModels()
-        let dir = self.modelDir
-        copyFromSourceIfNeeded()
-
-        guard modelsAvailable else {
-            throw NSError(domain: "transcribe", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "Models not available. Copy from SpikeMeetingLogger/Models to \(dir.path)"])
-        }
-
-        do {
-            preprocessor = try MLModel(contentsOf: dir.appendingPathComponent("Preprocessor.mlmodelc"))
-            encoder = try MLModel(contentsOf: dir.appendingPathComponent("Encoder.mlmodelc"))
-            decoder = try MLModel(contentsOf: dir.appendingPathComponent("Decoder.mlmodelc"))
-            joint = try MLModel(contentsOf: dir.appendingPathComponent("JointDecision.mlmodelc"))
-
-            guard let vp = Self.vocabPath(for: dir) else {
-                throw NSError(domain: "transcribe", code: 1,
-                              userInfo: [NSLocalizedDescriptionKey: "Vocab file not found in \(dir.path)"])
-            }
-            let vocabData = try Data(contentsOf: URL(fileURLWithPath: vp))
-            vocab = try JSONSerialization.jsonObject(with: vocabData) as! [String: String]
-            loadedModelName = SettingsStore.shared.selectedModel
-            loaded = true
-        } catch {
-            releaseModels()
-            throw error
-        }
-    }
-
-    func forceLoad() async throws {
-        try forceLoadSync()
     }
 
     func transcribeTest(path: String) throws -> String {

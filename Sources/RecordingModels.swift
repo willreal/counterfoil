@@ -152,6 +152,40 @@ struct SessionNoteMetadata: Codable, Equatable {
     let text: String
 }
 
+struct SessionAudioSegmentMetadata: Codable, Equatable, Sendable {
+    var filename: String
+    var offset: TimeInterval
+    var trimStart: TimeInterval? = nil
+    var duration: TimeInterval? = nil
+
+    var effectiveTrimStart: TimeInterval { max(0, trimStart ?? 0) }
+}
+
+enum AudioSegmentTimeline {
+    static func alignedSegment(
+        filename: String,
+        baseOffset: TimeInterval,
+        channelStartedAt: Date,
+        synchronizedStart: Date
+    ) -> SessionAudioSegmentMetadata {
+        SessionAudioSegmentMetadata(
+            filename: filename,
+            offset: max(0, baseOffset),
+            trimStart: max(0, synchronizedStart.timeIntervalSince(channelStartedAt)),
+            duration: nil
+        )
+    }
+
+    static func closed(
+        _ segment: SessionAudioSegmentMetadata,
+        at endOffset: TimeInterval
+    ) -> SessionAudioSegmentMetadata {
+        var value = segment
+        value.duration = max(0, endOffset - segment.offset)
+        return value
+    }
+}
+
 struct SessionMetadataV1: Codable, Equatable {
     static let currentSchemaVersion = 1
 
@@ -162,6 +196,8 @@ struct SessionMetadataV1: Codable, Equatable {
     var durationSeconds: TimeInterval
     var systemAudioFilename: String?
     var microphoneAudioFilename: String?
+    var systemSegments: [SessionAudioSegmentMetadata]? = nil
+    var microphoneSegments: [SessionAudioSegmentMetadata]? = nil
     var transcriptFilename: String
     var selectedModel: String
     var processingState: SessionProcessingState
@@ -171,6 +207,22 @@ struct SessionMetadataV1: Codable, Equatable {
 
     var stem: String {
         URL(fileURLWithPath: transcriptFilename).deletingPathExtension().lastPathComponent
+    }
+
+    var effectiveSystemSegments: [SessionAudioSegmentMetadata] {
+        if let systemSegments, !systemSegments.isEmpty { return systemSegments }
+        guard let systemAudioFilename else { return [] }
+        return [SessionAudioSegmentMetadata(filename: systemAudioFilename, offset: 0)]
+    }
+
+    var effectiveMicrophoneSegments: [SessionAudioSegmentMetadata] {
+        if let microphoneSegments, !microphoneSegments.isEmpty { return microphoneSegments }
+        guard let microphoneAudioFilename else { return [] }
+        return [SessionAudioSegmentMetadata(filename: microphoneAudioFilename, offset: 0)]
+    }
+
+    var allAudioFilenames: [String] {
+        Array(Set((effectiveSystemSegments + effectiveMicrophoneSegments).map(\.filename)))
     }
 }
 
@@ -254,6 +306,14 @@ enum AudioRetentionChoice: String, Codable, Equatable {
         guard self == .moveToTrashAfterThirtyDays else { return false }
         return now.timeIntervalSince(recordedAt) >= 30 * 24 * 60 * 60
     }
+}
+
+func formatRecordingClock(_ duration: TimeInterval) -> String {
+    let totalSeconds = max(0, Int(duration))
+    if totalSeconds >= 3600 {
+        return String(format: "%d:%02d:%02d", totalSeconds / 3600, (totalSeconds / 60) % 60, totalSeconds % 60)
+    }
+    return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
 }
 
 func formatElapsedTimestamp(_ elapsed: TimeInterval) -> String {

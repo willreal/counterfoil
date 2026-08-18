@@ -300,5 +300,43 @@ enum RecordingReliabilityTestSupport {
             && transcription.contains(.retryTranscription)
             && transcription.contains(.changeModel)
     }
+    static func segmentTimelineMetadataPasses() -> Bool {
+        var metadata = sampleMetadata(state: .recording)
+        let start = Date(timeIntervalSince1970: 1_786_300_000)
+        let systemStart = start.addingTimeInterval(0.035)
+        let microphoneStart = start.addingTimeInterval(0.010)
+        let synchronized = max(systemStart, microphoneStart)
+        let system = AudioSegmentTimeline.alignedSegment(
+            filename: "system.1.m4a",
+            baseOffset: 12.5,
+            channelStartedAt: systemStart,
+            synchronizedStart: synchronized
+        )
+        let microphone = AudioSegmentTimeline.alignedSegment(
+            filename: "microphone.1.m4a",
+            baseOffset: 12.5,
+            channelStartedAt: microphoneStart,
+            synchronizedStart: synchronized
+        )
+        metadata.systemSegments = [AudioSegmentTimeline.closed(system, at: 20)]
+        metadata.microphoneSegments = [AudioSegmentTimeline.closed(microphone, at: 20)]
+        guard let root = try? temporaryRoot() else { return false }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("segments.json")
+        do {
+            try SessionMetadataIO.write(metadata, to: url)
+            let decoded = try SessionMetadataIO.read(from: url)
+            guard decoded.systemSegments == metadata.systemSegments,
+                  decoded.microphoneSegments == metadata.microphoneSegments,
+                  decoded.effectiveSystemSegments.first?.duration == 7.5,
+                  abs((decoded.effectiveMicrophoneSegments.first?.effectiveTrimStart ?? 0) - 0.025) < 0.001 else {
+                return false
+            }
+            return true
+        } catch {
+            return false
+        }
+    }
+
 }
 #endif

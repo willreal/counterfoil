@@ -109,4 +109,8 @@ struct RecordingCoreTests {
     @Test func recoveryPolicyCoversFailureMatrix() {
         #expect(RecordingReliabilityTestSupport.recoveryActionsCoverFailureMatrix())
     }
+
+    @Test func persistedAudioSegmentTimelineRoundTrips() {
+        #expect(RecordingReliabilityTestSupport.segmentTimelineMetadataPasses())
+    }
 }

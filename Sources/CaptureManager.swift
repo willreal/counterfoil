@@ -11,9 +11,10 @@ private final class SystemAudioCapture: NSObject, SCStreamOutput, @unchecked Sen
     private var writer: AVAssetWriter?
     private var writerInput: AVAssetWriterInput?
     private var started = false
+    private var firstSampleDate: Date?
     private var failureMessage: String?
 
-    func start(to url: URL) async throws {
+    func start(to url: URL) async throws -> Date {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         guard let display = content.displays.first else {
             throw NSError(
@@ -66,7 +67,17 @@ private final class SystemAudioCapture: NSObject, SCStreamOutput, @unchecked Sen
         configuration.captureMicrophone = false
         configuration.excludesCurrentProcessAudio = true
 
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let excludedApplications: [SCRunningApplication]
+        if let bundleIdentifier = Bundle.main.bundleIdentifier {
+            excludedApplications = content.applications.filter { $0.bundleIdentifier == bundleIdentifier }
+        } else {
+            excludedApplications = []
+        }
+        let filter = SCContentFilter(
+            display: display,
+            excludingApplications: excludedApplications,
+            exceptingWindows: []
+        )
         let newStream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
 
@@ -75,6 +86,7 @@ private final class SystemAudioCapture: NSObject, SCStreamOutput, @unchecked Sen
             writerInput = newInput
             stream = newStream
             started = false
+            firstSampleDate = nil
             failureMessage = nil
         }
 
@@ -82,15 +94,15 @@ private final class SystemAudioCapture: NSObject, SCStreamOutput, @unchecked Sen
             try await newStream.startCapture()
             let deadline = Date().addingTimeInterval(10)
             while Date() < deadline {
-                let snapshot = sampleQueue.sync { (started, failureMessage) }
-                if let message = snapshot.1 {
+                let snapshot = sampleQueue.sync { (started, firstSampleDate, failureMessage) }
+                if let message = snapshot.2 {
                     throw NSError(
                         domain: "CounterfoilCapture",
                         code: 4,
                         userInfo: [NSLocalizedDescriptionKey: message]
                     )
                 }
-                if snapshot.0 { return }
+                if snapshot.0 { return snapshot.1 ?? Date() }
                 try await Task.sleep(nanoseconds: 50_000_000)
             }
             throw NSError(
@@ -118,6 +130,7 @@ private final class SystemAudioCapture: NSObject, SCStreamOutput, @unchecked Sen
             writerInput = nil
             stream = nil
             started = false
+            firstSampleDate = nil
             failureMessage = nil
             return (currentWriter, currentFailure)
         }
@@ -157,6 +170,7 @@ private final class SystemAudioCapture: NSObject, SCStreamOutput, @unchecked Sen
             writerInput = nil
             stream = nil
             started = false
+            firstSampleDate = nil
             failureMessage = nil
             return value
         }
@@ -181,6 +195,7 @@ private final class SystemAudioCapture: NSObject, SCStreamOutput, @unchecked Sen
                 return
             }
             writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            firstSampleDate = Date()
             started = true
         }
 
@@ -196,7 +211,7 @@ private final class MicrophoneCapture: @unchecked Sendable {
     private var engine: AVAudioEngine?
     private var file: AVAudioFile?
 
-    func start(to url: URL) throws {
+    func start(to url: URL) throws -> Date {
         let newEngine = AVAudioEngine()
         let inputNode = newEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
@@ -234,6 +249,7 @@ private final class MicrophoneCapture: @unchecked Sendable {
         try newEngine.start()
         engine = newEngine
         file = newFile
+        return Date()
     }
 
     func stop() {
@@ -245,10 +261,26 @@ private final class MicrophoneCapture: @unchecked Sendable {
     }
 }
 
-private enum AudioFinalizer {
-    static func merge(_ sourceURLs: [URL], to destinationURL: URL) async throws -> URL? {
-        guard !sourceURLs.isEmpty else { return nil }
+struct AudioSegmentInput: Sendable {
+    let url: URL
+    let offset: TimeInterval
+    let trimStart: TimeInterval
+    let duration: TimeInterval?
+
+    init(url: URL, metadata: SessionAudioSegmentMetadata) {
+        self.url = url
+        self.offset = max(0, metadata.offset)
+        self.trimStart = metadata.effectiveTrimStart
+        self.duration = metadata.duration.map { max(0, $0) }
+    }
+}
+
+enum AudioFinalizer {
+    static func merge(_ sourceSegments: [AudioSegmentInput], to destinationURL: URL) async throws -> URL? {
         let fileManager = FileManager.default
+        let segments = sourceSegments.filter { fileManager.fileExists(atPath: $0.url.path) }
+            .sorted { $0.offset < $1.offset }
+        guard !segments.isEmpty else { return nil }
         guard !fileManager.fileExists(atPath: destinationURL.path) else {
             throw NSError(
                 domain: "CounterfoilCapture",
@@ -257,9 +289,12 @@ private enum AudioFinalizer {
             )
         }
 
-        if sourceURLs.count == 1 {
+        if segments.count == 1,
+           segments[0].offset <= 0.005,
+           segments[0].trimStart <= 0.005,
+           segments[0].duration == nil {
             return try SessionFileRelocation.movePreservingSource(
-                from: sourceURLs[0],
+                from: segments[0].url,
                 to: destinationURL,
                 fileExists: { fileManager.fileExists(atPath: $0.path) },
                 move: { try fileManager.moveItem(at: $0, to: $1) }
@@ -267,36 +302,33 @@ private enum AudioFinalizer {
         }
 
         let composition = AVMutableComposition()
-        guard let compositionTrack = composition.addMutableTrack(
-            withMediaType: .audio,
-            preferredTrackID: kCMPersistentTrackID_Invalid
-        ) else {
-            throw NSError(
-                domain: "CounterfoilCapture",
-                code: 31,
-                userInfo: [NSLocalizedDescriptionKey: "The audio segments could not be combined."]
-            )
-        }
-
-        var insertionTime = CMTime.zero
-        for sourceURL in sourceURLs {
-            let asset = AVURLAsset(url: sourceURL)
-            guard let track = try await asset.loadTracks(withMediaType: .audio).first else { continue }
-            let duration = try await asset.load(.duration)
-            guard duration.isNumeric, duration.seconds > 0 else { continue }
+        var inserted = 0
+        for segment in segments {
+            let asset = AVURLAsset(url: segment.url)
+            guard let sourceTrack = try await asset.loadTracks(withMediaType: .audio).first else { continue }
+            let assetDuration = try await asset.load(.duration)
+            guard assetDuration.isNumeric, assetDuration.seconds > segment.trimStart else { continue }
+            let available = max(0, assetDuration.seconds - segment.trimStart)
+            let requested = segment.duration ?? available
+            let useDuration = min(available, max(0, requested))
+            guard useDuration > 0 else { continue }
+            guard let compositionTrack = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) else { continue }
             try compositionTrack.insertTimeRange(
-                CMTimeRange(start: .zero, duration: duration),
-                of: track,
-                at: insertionTime
+                CMTimeRange(
+                    start: CMTime(seconds: segment.trimStart, preferredTimescale: 600),
+                    duration: CMTime(seconds: useDuration, preferredTimescale: 600)
+                ),
+                of: sourceTrack,
+                at: CMTime(seconds: segment.offset, preferredTimescale: 600)
             )
-            insertionTime = insertionTime + duration
+            inserted += 1
         }
 
-        guard insertionTime.seconds > 0,
-              let exporter = AVAssetExportSession(
-                asset: composition,
-                presetName: AVAssetExportPresetAppleM4A
-              ) else {
+        guard inserted > 0,
+              let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
             throw NSError(
                 domain: "CounterfoilCapture",
                 code: 32,
@@ -316,9 +348,8 @@ private enum AudioFinalizer {
             guard fileManager.fileExists(atPath: temporaryURL.path) else { throw error }
             completedURL = temporaryURL
         }
-
-        for sourceURL in sourceURLs where sourceURL != completedURL {
-            try? fileManager.removeItem(at: sourceURL)
+        for segment in segments where segment.url != completedURL {
+            try? fileManager.removeItem(at: segment.url)
         }
         return completedURL
     }
@@ -359,7 +390,8 @@ final class CaptureManager: ObservableObject {
     private var metadata: SessionMetadataV1?
     private var systemSegments: [URL] = []
     private var microphoneSegments: [URL] = []
-    private var segmentOffsets: [TimeInterval] = []
+    private var systemSegmentMetadata: [SessionAudioSegmentMetadata] = []
+    private var microphoneSegmentMetadata: [SessionAudioSegmentMetadata] = []
     private var systemCaptureRunning = false
     private var microphoneCaptureRunning = false
     private var pauseStartTime: Date?
@@ -463,7 +495,8 @@ final class CaptureManager: ObservableObject {
         pauseStartTime = nil
         systemSegments = []
         microphoneSegments = []
-        segmentOffsets = []
+        systemSegmentMetadata = []
+        microphoneSegmentMetadata = []
 
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let availableCapacity = try? documentsURL
@@ -505,7 +538,10 @@ final class CaptureManager: ObservableObject {
         metadataURL = initialMetadataURL
         systemSegments = [firstSystemURL]
         microphoneSegments = Self.hasMic ? [firstMicURL] : []
-        segmentOffsets = [0]
+        systemSegmentMetadata = [SessionAudioSegmentMetadata(filename: firstSystemURL.lastPathComponent, offset: 0)]
+        microphoneSegmentMetadata = Self.hasMic
+            ? [SessionAudioSegmentMetadata(filename: firstMicURL.lastPathComponent, offset: 0)]
+            : []
         metadata = SessionMetadataV1(
             id: id,
             title: title,
@@ -513,6 +549,8 @@ final class CaptureManager: ObservableObject {
             durationSeconds: 0,
             systemAudioFilename: firstSystemURL.lastPathComponent,
             microphoneAudioFilename: Self.hasMic ? firstMicURL.lastPathComponent : nil,
+            systemSegments: systemSegmentMetadata,
+            microphoneSegments: microphoneSegmentMetadata,
             transcriptFilename: "\(baseName).md",
             selectedModel: SettingsStore.shared.selectedModel,
             processingState: .recording,
@@ -545,26 +583,42 @@ final class CaptureManager: ObservableObject {
         guard phase == .preparing,
               let systemURL = systemSegments.first else { return }
         do {
-            try await systemCapture.start(to: systemURL)
-            systemCaptureRunning = true
-            systemAudioState = .active
-
+            async let systemStart: Date = systemCapture.start(to: systemURL)
+            var microphoneStartedAt: Date?
             if Self.hasMic, let microphoneURL = microphoneSegments.first {
                 do {
-                    try microphoneCapture.start(to: microphoneURL)
+                    microphoneStartedAt = try microphoneCapture.start(to: microphoneURL)
                     microphoneCaptureRunning = true
                     microphoneState = .active
                 } catch {
                     microphoneState = .failed(error.localizedDescription)
                     await systemCapture.abort()
-                    systemCaptureRunning = false
                     throw error
                 }
             }
 
-            let actualStart = Date()
-            recordingStartTime = actualStart
-            metadata?.startTime = actualStart
+            let systemStartedAt = try await systemStart
+            systemCaptureRunning = true
+            systemAudioState = .active
+            let synchronizedStart = max(systemStartedAt, microphoneStartedAt ?? systemStartedAt)
+            recordingStartTime = synchronizedStart
+            metadata?.startTime = synchronizedStart
+
+            systemSegmentMetadata[0] = AudioSegmentTimeline.alignedSegment(
+                filename: systemURL.lastPathComponent,
+                baseOffset: 0,
+                channelStartedAt: systemStartedAt,
+                synchronizedStart: synchronizedStart
+            )
+            if let microphoneStartedAt, let microphoneURL = microphoneSegments.first {
+                microphoneSegmentMetadata[0] = AudioSegmentTimeline.alignedSegment(
+                    filename: microphoneURL.lastPathComponent,
+                    baseOffset: 0,
+                    channelStartedAt: microphoneStartedAt,
+                    synchronizedStart: synchronizedStart
+                )
+            }
+            syncSegmentMetadata()
             try persistMetadata()
             phase = .recording
             startDurationTimer()
@@ -582,8 +636,13 @@ final class CaptureManager: ObservableObject {
 
     func pauseCapture() {
         guard RecordingTransition.allows(.pause, from: phase) else { return }
+        let pauseRequestedAt = Date()
+        pauseStartTime = pauseRequestedAt
+        let pauseOffset = currentElapsedTime()
+        closeOpenSegments(at: pauseOffset)
+        syncSegmentMetadata()
+        try? persistMetadata()
         phase = .pausing
-        pauseStartTime = Date()
         Task {
             do {
                 try await stopActiveCaptures()
@@ -607,18 +666,24 @@ final class CaptureManager: ObservableObject {
               let id = sessionID,
               let requestedAt = sessionRequestedAt else { return }
 
+        let resumeRequestedAt = Date()
         if let pauseStartTime {
-            totalPausedDuration += Date().timeIntervalSince(pauseStartTime)
+            totalPausedDuration += resumeRequestedAt.timeIntervalSince(pauseStartTime)
         }
         self.pauseStartTime = nil
-        let offset = currentElapsedTime()
+        let baseOffset = currentElapsedTime()
         let index = systemSegments.count + 1
         let baseName = SessionNaming.baseName(title: sessionTitle, startTime: requestedAt, id: id)
         let systemURL = directory.appendingPathComponent("\(baseName).system.\(index).m4a")
         let microphoneURL = directory.appendingPathComponent("\(baseName).microphone.\(index).m4a")
         systemSegments.append(systemURL)
-        segmentOffsets.append(offset)
-        if Self.hasMic { microphoneSegments.append(microphoneURL) }
+        systemSegmentMetadata.append(SessionAudioSegmentMetadata(filename: systemURL.lastPathComponent, offset: baseOffset))
+        if Self.hasMic {
+            microphoneSegments.append(microphoneURL)
+            microphoneSegmentMetadata.append(SessionAudioSegmentMetadata(filename: microphoneURL.lastPathComponent, offset: baseOffset))
+        }
+        syncSegmentMetadata()
+        try? persistMetadata()
 
         phase = .resuming
         systemAudioState = .preparing
@@ -626,14 +691,35 @@ final class CaptureManager: ObservableObject {
 
         Task {
             do {
-                try await systemCapture.start(to: systemURL)
-                systemCaptureRunning = true
-                systemAudioState = .active
+                async let systemStart: Date = systemCapture.start(to: systemURL)
+                var microphoneStartedAt: Date?
                 if Self.hasMic {
-                    try microphoneCapture.start(to: microphoneURL)
+                    microphoneStartedAt = try microphoneCapture.start(to: microphoneURL)
                     microphoneCaptureRunning = true
                     microphoneState = .active
                 }
+                let systemStartedAt = try await systemStart
+                systemCaptureRunning = true
+                systemAudioState = .active
+                let synchronizedStart = max(systemStartedAt, microphoneStartedAt ?? systemStartedAt)
+                totalPausedDuration += max(0, synchronizedStart.timeIntervalSince(resumeRequestedAt))
+
+                systemSegmentMetadata[systemSegmentMetadata.count - 1] = AudioSegmentTimeline.alignedSegment(
+                    filename: systemURL.lastPathComponent,
+                    baseOffset: baseOffset,
+                    channelStartedAt: systemStartedAt,
+                    synchronizedStart: synchronizedStart
+                )
+                if let microphoneStartedAt {
+                    microphoneSegmentMetadata[microphoneSegmentMetadata.count - 1] = AudioSegmentTimeline.alignedSegment(
+                        filename: microphoneURL.lastPathComponent,
+                        baseOffset: baseOffset,
+                        channelStartedAt: microphoneStartedAt,
+                        synchronizedStart: synchronizedStart
+                    )
+                }
+                syncSegmentMetadata()
+                try persistMetadata()
                 phase = .recording
             } catch {
                 await systemCapture.abort()
@@ -701,6 +787,11 @@ final class CaptureManager: ObservableObject {
 
     func stop(store: TranscriptStore) {
         guard RecordingTransition.allows(.stop, from: phase) else { return }
+        let stopOffset = currentElapsedTime()
+        closeOpenSegments(at: stopOffset)
+        syncSegmentMetadata()
+        metadata?.durationSeconds = stopOffset
+        try? persistMetadata()
         phase = .saving
         durationTimer?.cancel()
         durationTimer = nil
@@ -731,8 +822,11 @@ final class CaptureManager: ObservableObject {
                 ? directory.appendingPathComponent("\(finalBaseName).mic.m4a")
                 : nil
 
+            let systemInputs = zip(systemSegments, systemSegmentMetadata).map {
+                AudioSegmentInput(url: $0.0, metadata: $0.1)
+            }
             guard let finalSystemURL = try await AudioFinalizer.merge(
-                systemSegments,
+                systemInputs,
                 to: requestedSystemURL
             ) else {
                 throw NSError(
@@ -743,8 +837,11 @@ final class CaptureManager: ObservableObject {
             }
             var finalMicrophoneURL: URL?
             if let requestedMicrophoneURL, !microphoneSegments.isEmpty {
+                let microphoneInputs = zip(microphoneSegments, microphoneSegmentMetadata).map {
+                    AudioSegmentInput(url: $0.0, metadata: $0.1)
+                }
                 finalMicrophoneURL = try await AudioFinalizer.merge(
-                    microphoneSegments,
+                    microphoneInputs,
                     to: requestedMicrophoneURL
                 )
             }
@@ -761,6 +858,8 @@ final class CaptureManager: ObservableObject {
                 durationSeconds: duration,
                 systemAudioFilename: finalSystemURL.lastPathComponent,
                 microphoneAudioFilename: finalMicrophoneURL?.lastPathComponent,
+                systemSegments: [SessionAudioSegmentMetadata(filename: finalSystemURL.lastPathComponent, offset: 0)],
+                microphoneSegments: finalMicrophoneURL.map { [SessionAudioSegmentMetadata(filename: $0.lastPathComponent, offset: 0)] },
                 transcriptFilename: "\(finalBaseName).md",
                 selectedModel: SettingsStore.shared.selectedModel,
                 processingState: .transcribing,
@@ -780,24 +879,16 @@ final class CaptureManager: ObservableObject {
             resetCaptureResourcesForProcessing()
 
             do {
-                defer { Transcriber.shared.releaseModels() }
-                let systemText = try await Transcriber.shared.transcribe(
-                    filePath: finalSystemURL.path,
-                    baseOffset: 0
+                let result = try await TranscriptionCoordinator.shared.transcribeSession(
+                    systemURL: finalSystemURL,
+                    microphoneURL: finalMicrophoneURL,
+                    modelName: finalizedMetadata.selectedModel
                 )
-                var microphoneText = ""
-                if let finalMicrophoneURL,
-                   FileManager.default.fileExists(atPath: finalMicrophoneURL.path) {
-                    microphoneText = try await Transcriber.shared.transcribe(
-                        filePath: finalMicrophoneURL.path,
-                        baseOffset: 0
-                    )
-                }
                 try store.completeProcessingSession(
                     metadata: finalizedMetadata,
                     dayDir: directory,
-                    systemText: systemText,
-                    microphoneText: microphoneText
+                    systemText: result.systemText,
+                    microphoneText: result.microphoneText
                 )
                 phase = .complete(sessionID: id.uuidString.lowercased())
                 Task {
@@ -899,6 +990,10 @@ final class CaptureManager: ObservableObject {
     }
 
     private func stopActiveCaptures() async throws {
+        if microphoneCaptureRunning {
+            microphoneCapture.stop()
+            microphoneCaptureRunning = false
+        }
         var systemError: Error?
         if systemCaptureRunning {
             do {
@@ -908,11 +1003,23 @@ final class CaptureManager: ObservableObject {
             }
             systemCaptureRunning = false
         }
-        if microphoneCaptureRunning {
-            microphoneCapture.stop()
-            microphoneCaptureRunning = false
-        }
         if let systemError { throw systemError }
+    }
+
+    private func syncSegmentMetadata() {
+        metadata?.systemSegments = systemSegmentMetadata
+        metadata?.microphoneSegments = microphoneSegmentMetadata
+    }
+
+    private func closeOpenSegments(at endOffset: TimeInterval) {
+        if let index = systemSegmentMetadata.indices.last,
+           systemSegmentMetadata[index].duration == nil {
+            systemSegmentMetadata[index] = AudioSegmentTimeline.closed(systemSegmentMetadata[index], at: endOffset)
+        }
+        if let index = microphoneSegmentMetadata.indices.last,
+           microphoneSegmentMetadata[index].duration == nil {
+            microphoneSegmentMetadata[index] = AudioSegmentTimeline.closed(microphoneSegmentMetadata[index], at: endOffset)
+        }
     }
 
     private func persistMetadata() throws {
@@ -974,7 +1081,8 @@ final class CaptureManager: ObservableObject {
         microphoneState = .unavailable
         systemSegments = []
         microphoneSegments = []
-        segmentOffsets = []
+        systemSegmentMetadata = []
+        microphoneSegmentMetadata = []
         flaggedOffsets = []
         notes = []
         pendingNoteOffset = nil

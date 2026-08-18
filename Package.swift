@@ -17,6 +17,8 @@ let package = Package(
                 "CaptureManager.swift",
                 "RecordingWindow.swift",
                 "SettingsStore.swift",
+                "ModelInstaller.swift",
+                "TranscriptionCoordinator.swift",
                 "TranscriptNavigationViews.swift",
                 "Transcribe.swift",
                 "TranscriptStore.swift",
@@ -49,6 +51,7 @@ let package = Package(
             exclude: [
                 "RecordingPanelPreview.swift",
                 "RecordingPanelPreviewInfo.plist",
+                "ProductionReliabilityChecks.swift",
             ],
             sources: ["main.swift"]
         ),
